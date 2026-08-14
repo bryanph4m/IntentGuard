@@ -6,6 +6,14 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const CANDIDATE_IDS = ["legacy", "A", "B", "C"] as const;
+const EXPECTED_CASE_COUNT = 7;
+const EXPECTED_OUTCOME_COUNT = EXPECTED_CASE_COUNT * CANDIDATE_IDS.length;
+const EXPECTED_AUDIT_COUNTS: Readonly<Record<CandidateId, number>> = {
+  legacy: 6,
+  A: 3,
+  B: 6,
+  C: 6,
+};
 const HEALTH_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 2_000;
 const MAX_CAPTURED_LOG_CHARS = 20_000;
@@ -250,6 +258,12 @@ async function loadExpectedFixture(): Promise<ExpectedFixture> {
   }
   const cases = rawCases.map((testCase, index) =>
     parseExpectedCase(testCase, index),
+  );
+  assert.equal(cases.length, EXPECTED_CASE_COUNT, "pinned fixture case count");
+  assert.equal(
+    cases.length * CANDIDATE_IDS.length,
+    EXPECTED_OUTCOME_COUNT,
+    "pinned fixture outcome count",
   );
   const caseIds = new Set(cases.map((testCase) => testCase.id));
   if (caseIds.size !== cases.length) {
@@ -550,6 +564,11 @@ async function replayExpectedCases(
     expectedAudits.length,
     `${spec.candidateId}/audit record count`,
   );
+  assert.equal(
+    records.length,
+    EXPECTED_AUDIT_COUNTS[spec.candidateId],
+    `${spec.candidateId}/pinned audit total`,
+  );
   assert.deepStrictEqual(
     records,
     expectedAudits,
@@ -581,6 +600,7 @@ async function testService(
     );
   } finally {
     await terminateService(running);
+    assert.equal(running.isClosed(), true, `${spec.candidateId} process teardown`);
   }
 }
 
@@ -592,7 +612,9 @@ async function main(): Promise<void> {
     await testService(spec, fixture, pythonExecutable);
   }
 
-  console.log("service regression smoke test passed");
+  console.log(
+    `service regression smoke test passed: ${String(EXPECTED_OUTCOME_COUNT)} pinned outcomes`,
+  );
 }
 
 main().catch((error: unknown) => {

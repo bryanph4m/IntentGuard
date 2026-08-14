@@ -18,10 +18,11 @@
     "test": "pnpm run typecheck && pnpm run smoke"
   },
   "dependencies": {
-    "@intentguard/contracts": "workspace:*"
+    "@intentguard/contracts": "workspace:*",
+    "@intentguard/control": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^20.17.0",
+    "@types/node": "^24.3.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

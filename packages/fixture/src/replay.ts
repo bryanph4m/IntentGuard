@@ -3,6 +3,7 @@ import type {
   CorpusInput,
   RawResult,
 } from "@intentguard/contracts";
+import { emitEvent } from "@intentguard/control/events";
 
 export const REPLAY_TIMEOUT_MS = 5_000;
 
@@ -143,6 +144,14 @@ export async function replay(
   for (const input of corpus) {
     results.push(await replayInput(runId, previewUrl, input, candidateId));
   }
+
+  emitEvent(runId, {
+    source: "control",
+    type: "CORPUS_REPLAYED",
+    candidateId,
+    message: `Replayed ${String(results.length)} corpus inputs against ${candidateId}.`,
+    payload: { results },
+  });
 
   return results;
 }
