@@ -28,3 +28,8 @@ Thumbs.db
 .tmp-browse-preamble.sh
 graphify-out/
 .gstack/
+
+# Agent skills (installed locally)
+.agents/skills/
+skills/
+skills-lock.json
