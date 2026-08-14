@@ -59,7 +59,7 @@ class DaytonaSandboxAdapter implements SandboxPort {
     return { exitCode: result.exitCode, output: result.result };
   }
 
-  async start(command: string, cwd: string, timeoutSeconds: number): Promise<void> {
+  async start(command: string, timeoutSeconds: number): Promise<void> {
     const sessionId = `intentguard-app-${this.id}`;
     await this.sandbox.process.createSession(sessionId);
     await this.sandbox.process.executeSessionCommand(

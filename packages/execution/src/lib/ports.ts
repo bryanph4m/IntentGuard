@@ -17,7 +17,7 @@ export interface SandboxPort {
   ): Promise<void>;
   resize(resources: { cpu: number; memory: number; disk: number }, timeoutSeconds: number): Promise<void>;
   execute(command: string, cwd: string, env: Record<string, string>, timeoutSeconds: number): Promise<CommandResult>;
-  start(command: string, cwd: string, timeoutSeconds: number): Promise<void>;
+  start(command: string, timeoutSeconds: number): Promise<void>;
   signedPreviewUrl(port: number, expiresInSeconds: number): Promise<string>;
   delete(timeoutSeconds: number): Promise<void>;
 }
@@ -56,6 +56,7 @@ export type RuntimeDependencies = {
 export type SandboxRecord = {
   candidateId: CandidateId;
   snapshotId: string;
+  sourceDir: string;
   sandbox: SandboxPort;
   scan?: ScanResult;
 };

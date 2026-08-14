@@ -1,3 +1,4 @@
+import { posix as path } from "node:path";
 import type {
   CandidateId,
   GateResult,
@@ -5,9 +6,26 @@ import type {
   ScanResult,
   Verdict,
 } from "@intentguard/contracts";
-import type { ProvisionConfig, RepositoryTarget } from "./lib/env.js";
+import {
+  executionCandidateIds,
+  type ExecutionCandidateId,
+  type ProvisionConfig,
+  validateRepositoryTargets,
+} from "./lib/env.js";
 import type { DaytonaPort, RuntimeDependencies, SandboxRecord } from "./lib/ports.js";
-import { scanSandbox } from "./snyk.js";
+import { scanSandbox, type SnykConfig } from "./snyk.js";
+
+type CandidateRuntimeTarget = {
+  sourcePath: string;
+  entrypoint: "server.py";
+};
+
+const candidateRuntimeTargets: Record<ExecutionCandidateId, CandidateRuntimeTarget> = {
+  legacy: { sourcePath: "packages/fixture/legacy", entrypoint: "server.py" },
+  A: { sourcePath: "packages/fixture/candidates/A", entrypoint: "server.py" },
+  B: { sourcePath: "packages/fixture/candidates/B", entrypoint: "server.py" },
+  C: { sourcePath: "packages/fixture/candidates/C", entrypoint: "server.py" },
+};
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -16,6 +34,10 @@ function errorMessage(error: unknown): string {
 function safeName(value: string): string {
   const normalized = value.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
   return normalized.slice(0, 48) || "intentguard";
+}
+
+function shellArgument(value: string): string {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
 }
 
 function credentials(config: ProvisionConfig): { username: string; password: string } | undefined {
@@ -32,10 +54,29 @@ function healthUrl(previewUrl: string, healthPath: string): string {
   return url.toString();
 }
 
+function executionCandidateId(candidateId: CandidateId): ExecutionCandidateId {
+  if (!executionCandidateIds.includes(candidateId as ExecutionCandidateId)) {
+    throw new Error(`Unknown execution candidate target: ${candidateId}.`);
+  }
+  return candidateId as ExecutionCandidateId;
+}
+
+function snykConfig(config: ProvisionConfig, candidateId: ExecutionCandidateId): SnykConfig {
+  if (config.snyk.token === undefined) {
+    throw new Error(`SNYK_TOKEN is required to provision scannable candidate ${candidateId}.`);
+  }
+  return {
+    token: config.snyk.token,
+    cliPath: config.snyk.cliPath,
+    timeoutSeconds: config.snyk.timeoutSeconds,
+  };
+}
+
 export class ExecutionRuntime {
   private daytona: DaytonaPort | undefined;
   private lastProvisionConfig: ProvisionConfig | undefined;
   private readonly runs = new Map<string, Map<CandidateId, SandboxRecord>>();
+  private readonly providerContactedRuns = new Set<string>();
   private readonly tornDownRuns = new Set<string>();
 
   constructor(private readonly dependencies: RuntimeDependencies) {}
@@ -65,30 +106,26 @@ export class ExecutionRuntime {
     throw new Error(`Health check ${url} timed out: ${lastFailure}.`);
   }
 
-  private requireRepository(config: ProvisionConfig, candidateId: CandidateId): RepositoryTarget {
-    const target = config.repositories[candidateId];
-    if (target === undefined) {
-      throw new Error(`EXECUTION_REPOSITORIES_JSON has no immutable target for ${candidateId}.`);
-    }
-    return target;
-  }
-
   private async provisionOne(
     runId: string,
-    candidateId: CandidateId,
+    candidateId: ExecutionCandidateId,
     snapshotId: string,
     config: ProvisionConfig,
     records: Map<CandidateId, SandboxRecord>,
   ): Promise<SandboxRef> {
-    const target = this.requireRepository(config, candidateId);
-    const sandbox = await this.client(config).create({
+    const runtimeTarget = candidateRuntimeTargets[candidateId];
+    const target = config.repositories[candidateId];
+    const sourceDir = path.join(config.repositoryDir, runtimeTarget.sourcePath);
+    const client = this.client(config);
+    this.providerContactedRuns.add(runId);
+    const sandbox = await client.create({
       name: safeName(`ig-${runId}-${candidateId}`),
       snapshotId,
       labels: { application: "intentguard", runId, candidateId },
       ttlMinutes: config.daytona.ttlMinutes,
       networkAllowList: config.networkAllowList,
     }, config.daytona.createTimeoutSeconds);
-    const record: SandboxRecord = { candidateId, snapshotId, sandbox };
+    const record: SandboxRecord = { candidateId, snapshotId, sourceDir, sandbox };
     records.set(candidateId, record);
     await sandbox.resize(config.daytona.resources, config.daytona.createTimeoutSeconds);
     const previewUrl = await sandbox.signedPreviewUrl(config.appPort, config.daytona.previewTtlSeconds);
@@ -116,18 +153,26 @@ export class ExecutionRuntime {
       payload: { commitSha: target.commitSha },
     });
     if (candidateId !== "legacy") {
-      record.scan = await scanSandbox(candidateId, sandbox, config.repositoryDir, config.snyk);
+      record.scan = await scanSandbox(candidateId, sandbox, sourceDir, snykConfig(config, candidateId));
     }
     const install = await sandbox.execute(
       config.installCommand,
-      config.repositoryDir,
+      sourceDir,
       {},
       config.daytona.commandTimeoutSeconds,
     );
     if (install.exitCode !== 0) {
       throw new Error(`Dependency installation failed for ${candidateId} with exit ${String(install.exitCode)}.`);
     }
-    await sandbox.start(config.startCommand, config.repositoryDir, config.daytona.commandTimeoutSeconds);
+    const startCommand = [
+      "cd --",
+      shellArgument(sourceDir),
+      "&& exec python3",
+      shellArgument(runtimeTarget.entrypoint),
+      "--port",
+      String(config.appPort),
+    ].join(" ");
+    await sandbox.start(startCommand, config.daytona.commandTimeoutSeconds);
     await this.waitForHealth(previewUrl, config);
     this.dependencies.emitEvent(runId, {
       source: "daytona",
@@ -141,15 +186,23 @@ export class ExecutionRuntime {
 
   async provision(runId: string, candidateIds: CandidateId[], snapshotId: string): Promise<SandboxRef[]> {
     if (this.runs.has(runId)) throw new Error(`Run ${runId} already owns execution sandboxes.`);
+    const records = new Map<CandidateId, SandboxRecord>();
+    this.runs.set(runId, records);
+    this.providerContactedRuns.delete(runId);
+    this.tornDownRuns.delete(runId);
     if (candidateIds.length === 0) throw new Error("Provisioning requires at least one candidate.");
     if (new Set(candidateIds).size !== candidateIds.length) throw new Error("Candidate IDs must be unique.");
     const config = this.dependencies.loadProvisionConfig();
+    // Revalidate injected configurations as well as production environment input.
+    validateRepositoryTargets(config.repositories);
+    credentials(config);
+    const internalCandidateIds = candidateIds.map((candidateId) => executionCandidateId(candidateId));
+    for (const internalCandidateId of internalCandidateIds) {
+      if (internalCandidateId !== "legacy") snykConfig(config, internalCandidateId);
+    }
     this.lastProvisionConfig = config;
-    const records = new Map<CandidateId, SandboxRecord>();
-    this.runs.set(runId, records);
-    this.tornDownRuns.delete(runId);
     const settled = await Promise.allSettled(
-      candidateIds.map((candidateId) => this.provisionOne(runId, candidateId, snapshotId, config, records)),
+      internalCandidateIds.map((candidateId) => this.provisionOne(runId, candidateId, snapshotId, config, records)),
     );
     const failures = settled.filter((item): item is PromiseRejectedResult => item.status === "rejected");
     if (failures.length !== 0) {
@@ -172,8 +225,16 @@ export class ExecutionRuntime {
     if (record === undefined || record.sandbox.id !== ref.sandboxId) {
       throw new Error(`Sandbox ${ref.sandboxId} is not registered to ${runId}/${ref.candidateId}.`);
     }
+    if (ref.candidateId === "legacy") {
+      throw new Error("Legacy is the behavioral baseline and is not Snyk-scanned.");
+    }
     const config = this.dependencies.loadProvisionConfig();
-    record.scan ??= await scanSandbox(ref.candidateId, record.sandbox, config.repositoryDir, config.snyk);
+    record.scan ??= await scanSandbox(
+      ref.candidateId,
+      record.sandbox,
+      record.sourceDir,
+      snykConfig(config, executionCandidateId(ref.candidateId)),
+    );
     this.dependencies.emitEvent(runId, {
       source: "snyk",
       type: "SCAN_COMPLETE",
@@ -186,6 +247,18 @@ export class ExecutionRuntime {
 
   async teardown(runId: string): Promise<void> {
     if (this.tornDownRuns.has(runId)) return;
+    const locallyKnownRun = this.runs.has(runId);
+    if (locallyKnownRun && !this.providerContactedRuns.has(runId)) {
+      this.runs.delete(runId);
+      this.tornDownRuns.add(runId);
+      this.dependencies.emitEvent(runId, {
+        source: "daytona",
+        type: "TORN_DOWN",
+        message: "0 Daytona sandbox(es) torn down.",
+        payload: { sandboxCount: 0 },
+      });
+      return;
+    }
     const daytonaConfig = this.lastProvisionConfig?.daytona ?? this.dependencies.loadDaytonaConfig();
     const client = this.daytona ??= this.dependencies.createDaytona(daytonaConfig);
     const registered = [...(this.runs.get(runId)?.values() ?? [])].map((record) => record.sandbox);
@@ -205,6 +278,7 @@ export class ExecutionRuntime {
       );
     }
     this.runs.delete(runId);
+    this.providerContactedRuns.delete(runId);
     this.tornDownRuns.add(runId);
     this.dependencies.emitEvent(runId, {
       source: "daytona",

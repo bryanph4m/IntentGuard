@@ -15,7 +15,26 @@ const repositorySchema = z.object({
   ),
 }).strict();
 
-const repositoriesSchema = z.record(z.string().min(1), repositorySchema);
+export const executionCandidateIds = ["legacy", "A", "B", "C"] as const;
+export type ExecutionCandidateId = (typeof executionCandidateIds)[number];
+
+const repositoriesSchema = z.object({
+  legacy: repositorySchema,
+  A: repositorySchema,
+  B: repositorySchema,
+  C: repositorySchema,
+}).strict().superRefine((repositories, context) => {
+  for (const candidateId of executionCandidateIds.slice(1)) {
+    const target = repositories[candidateId];
+    if (target.url !== repositories.legacy.url || target.commitSha !== repositories.legacy.commitSha) {
+      context.addIssue({
+        code: "custom",
+        path: [candidateId],
+        message: "must use the same monorepo URL and immutable commit as legacy",
+      });
+    }
+  }
+});
 
 const provisionEnvSchema = z.object({
   DAYTONA_API_KEY: z.string().min(1),
@@ -30,16 +49,15 @@ const provisionEnvSchema = z.object({
   DAYTONA_PREVIEW_TTL_SECONDS: positiveInteger.default(3600),
   EXECUTION_REPOSITORIES_JSON: z.string().min(2),
   EXECUTION_REPOSITORY_DIR: z.string().min(1).default("/home/daytona/app"),
-  EXECUTION_INSTALL_COMMAND: z.string().min(1).default("corepack pnpm install --frozen-lockfile"),
-  EXECUTION_START_COMMAND: z.string().min(1).default("corepack pnpm start"),
-  EXECUTION_APP_PORT: positiveInteger.default(3000),
+  EXECUTION_INSTALL_COMMAND: z.string().min(1).default("python3 -m compileall -q ."),
+  EXECUTION_APP_PORT: positiveInteger.default(8080),
   EXECUTION_HEALTH_PATH: z.string().regex(/^\//, "must begin with /").default("/health"),
   EXECUTION_HEALTH_TIMEOUT_SECONDS: positiveInteger.default(120),
   EXECUTION_HEALTH_POLL_MS: positiveInteger.default(1000),
-  EXECUTION_NETWORK_ALLOWLIST: z.string().default("github.com,registry.npmjs.org"),
+  EXECUTION_NETWORK_ALLOWLIST: z.string().default("github.com,*.snyk.io"),
   EXECUTION_GIT_USERNAME: optionalNonEmptyString,
   EXECUTION_GIT_TOKEN: optionalNonEmptyString,
-  SNYK_TOKEN: z.string().min(1),
+  SNYK_TOKEN: optionalNonEmptyString,
   SNYK_CLI_PATH: z.string().regex(/^[A-Za-z0-9._/-]+$/).default("snyk"),
   SNYK_TIMEOUT_SECONDS: positiveInteger.default(180),
 }).strict();
@@ -66,6 +84,7 @@ const rocketRideEnvSchema = z.object({
 }).strict();
 
 export type RepositoryTarget = z.infer<typeof repositorySchema>;
+export type RepositoryTargets = z.infer<typeof repositoriesSchema>;
 
 export type ProvisionConfig = {
   daytona: {
@@ -78,10 +97,9 @@ export type ProvisionConfig = {
     commandTimeoutSeconds: number;
     previewTtlSeconds: number;
   };
-  repositories: Record<string, RepositoryTarget>;
+  repositories: RepositoryTargets;
   repositoryDir: string;
   installCommand: string;
-  startCommand: string;
   appPort: number;
   healthPath: string;
   healthTimeoutSeconds: number;
@@ -89,7 +107,7 @@ export type ProvisionConfig = {
   networkAllowList: string;
   gitUsername?: string;
   gitToken?: string;
-  snyk: { token: string; cliPath: string; timeoutSeconds: number };
+  snyk: { token: string | undefined; cliPath: string; timeoutSeconds: number };
 };
 
 export type RocketRideConfig = z.infer<typeof rocketRideEnvSchema>;
@@ -99,14 +117,18 @@ function ownEnvironment(keys: readonly string[]): Record<string, string | undefi
   return Object.fromEntries(keys.map((key) => [key, process.env[key]]));
 }
 
-function parseRepositories(value: string): Record<string, RepositoryTarget> {
+export function validateRepositoryTargets(value: unknown): RepositoryTargets {
+  return repositoriesSchema.parse(value);
+}
+
+function parseRepositories(value: string): RepositoryTargets {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
   } catch (error: unknown) {
     throw new Error("EXECUTION_REPOSITORIES_JSON must be valid JSON.", { cause: error });
   }
-  return repositoriesSchema.parse(parsed);
+  return validateRepositoryTargets(parsed);
 }
 
 export function loadProvisionConfig(): ProvisionConfig {
@@ -130,7 +152,6 @@ export function loadProvisionConfig(): ProvisionConfig {
     repositories: parseRepositories(env.EXECUTION_REPOSITORIES_JSON),
     repositoryDir: env.EXECUTION_REPOSITORY_DIR,
     installCommand: env.EXECUTION_INSTALL_COMMAND,
-    startCommand: env.EXECUTION_START_COMMAND,
     appPort: env.EXECUTION_APP_PORT,
     healthPath: env.EXECUTION_HEALTH_PATH,
     healthTimeoutSeconds: env.EXECUTION_HEALTH_TIMEOUT_SECONDS,
