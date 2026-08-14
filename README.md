@@ -4,7 +4,8 @@ IntentGuard replays rule-derived boundary inputs against a legacy refund service
 and modernization candidates, then presents the control plane's evidence as a
 reconciliation ledger and signed approval packet.
 
-This checkout contains Bryan's owned surfaces:
+This checkout contains the fixture/interface surfaces plus the durable control
+plane:
 
 - `packages/fixture`: the legacy service, candidates A/B/C, deterministic corpus
   generator, raw replay client, and regression smoke tests.
@@ -12,10 +13,12 @@ This checkout contains Bryan's owned surfaces:
   cases across all four services.
 - `apps/web`: the strict TypeScript reconciliation interface and its
   SSE-compatible development run adapter.
+- `apps/control`: SQLite/WAL run storage, the worker state machine, comparison,
+  deterministic policy, SSE, approval digests, and stored-evidence reports.
 
 ## Prerequisites
 
-- Node.js 20 or newer
+- Node.js 22.5 or newer (the control plane uses the built-in SQLite module)
 - pnpm 11
 - Python 3.8 or newer for local verification; the legacy service also remains
   compatible with Python 2.7
@@ -80,3 +83,18 @@ pnpm --filter @intentguard/web build
 
 See `apps/web/README.md` for the presentation payloads expected inside the
 shared `RunEvent` envelope.
+
+## Run the real control API
+
+Place the real Forge export at `forge/rules.json`, configure the values in
+`.env.example` as needed, then run:
+
+```sh
+pnpm dev:control
+```
+
+The API persists queued runs and serves snapshots, named SSE events, approval,
+and reports. Real worker execution is composed through the ports exported by
+`@intentguard/control`; it deliberately does not substitute the canonical mock
+for missing Forge or execution adapters. See `apps/control/README.md` for the
+route list, integration boundary, and verification commands.

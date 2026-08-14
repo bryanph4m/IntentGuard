@@ -6,13 +6,15 @@
   "packageManager": "pnpm@11.21.0",
   "scripts": {
     "build": "pnpm -r --if-present build",
+    "dev:control": "pnpm --filter @intentguard/control dev",
     "dev:web": "pnpm --filter @intentguard/web dev",
     "test": "pnpm -r --if-present test",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck:all": "pnpm typecheck && pnpm -r --if-present typecheck",
     "mock": "tsx apps/control/scripts/mock-print.ts",
     "mock:serve": "tsx apps/control/scripts/mock-sse.ts",
-    "smoke:control": "tsx apps/control/scripts/smoke-control.ts",
+    "smoke:control": "pnpm --filter @intentguard/control smoke:mock",
+    "smoke:control-core": "pnpm --filter @intentguard/control smoke",
     "smoke:fixture": "pnpm --filter @intentguard/fixture smoke"
   },
   "devDependencies": {
