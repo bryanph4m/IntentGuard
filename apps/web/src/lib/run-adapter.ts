@@ -72,13 +72,17 @@ function subscribeToRun(
   const path = `/api/runs/${encodeURIComponent(runId)}/events${query}`;
   const stream = new EventSource(urlFor(baseUrl, path));
   const listeners = new Map<string, EventListener>();
+  let verdictObserved = false;
+  let teardownObserved = false;
 
   const handleRunEvent = (message: MessageEvent<string>) => {
     try {
       const value: unknown = JSON.parse(message.data);
       const event = parseRunEvent(value);
+      if (event.type === "VERDICT_READY") verdictObserved = true;
+      if (event.type === "TORN_DOWN") teardownObserved = true;
       callbacks.onEvent(event);
-      if (event.type === "TORN_DOWN") stream.close();
+      if (verdictObserved && teardownObserved) stream.close();
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error);
       callbacks.onError(new Error(`Run event could not be read: ${detail}`));
