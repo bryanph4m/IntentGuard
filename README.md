@@ -1,14 +1,14 @@
 # IntentGuard
 
-IntentGuard decides whether an AI-rewritten service is safe to ship. It runs
-every rewrite candidate against a corpus of inputs derived from business rules
-recovered from the legacy source, compares each candidate's behavior to what
-the legacy system actually does, and turns any divergence into evidence a
+IntentGuard checks whether an AI-rewritten service is safe to ship. It runs
+every rewrite candidate against a set of test inputs built from the business
+rules found in the legacy source, compares each candidate's behavior to what
+the legacy system actually does, and turns any difference into evidence a
 human can approve or block.
 
-The expected values come from the legacy system's observed behavior, not from
-anyone's belief about what it should be. The rule-recovery model explains a
-result; it never votes on pass or fail. Execution decides.
+The expected values come from what the legacy system actually does, not from
+anyone's opinion about what it should do. The rule-recovery model explains the
+result. It never decides pass or fail. Running the code decides.
 
 ## Table of contents
 
@@ -30,47 +30,48 @@ result; it never votes on pass or fail. Execution decides.
 
 ## Problem statement
 
-An agent can rewrite a legacy service in minutes. Nobody can tell, from
-reading the diff or the agent's own explanation, whether the rewrite actually
-preserves the legacy system's behavior. Legacy business rules are frequently
-undocumented — the only source of truth is the code itself, including edge
-cases nobody wrote down (rounding, threshold boundaries, negative-amount
-handling, role checks). A rewrite that looks correct and passes a hand-written
-test suite can still silently change what happens at those edges, and the
-first place that shows up is production.
+An agent can rewrite a legacy service in minutes. But nobody can tell, just
+from reading the diff or the agent's own explanation, whether the rewrite
+actually behaves the same as the old system. Legacy business rules are often
+undocumented. The code itself is the only real record, including edge cases
+nobody wrote down, like rounding, threshold boundaries, negative amounts, or
+role checks. A rewrite can look correct and pass a hand-written test suite,
+and still quietly change what happens at those edges. The first place that
+shows up is production.
 
-Trusting the agent's own account of its rewrite — or a model's opinion on
-whether the diff "looks right" — reintroduces exactly the risk the rewrite was
+Trusting the agent's own explanation of its rewrite, or a model's opinion on
+whether the diff "looks right," brings back the exact risk the rewrite was
 supposed to fix.
 
 ## Solution
 
-IntentGuard treats correctness as an empirical question, not an opinion:
+IntentGuard tests for correctness instead of guessing at it:
 
-1. **Recover intent.** Forge reads the legacy source and produces a rules
-   export (`forge/rules.json`) — the business rules actually implemented by
-   the legacy system, including the ones nobody documented.
-2. **Generate a corpus.** A deterministic corpus generator turns those rules
-   into concrete boundary-condition inputs (`packages/fixture`).
-3. **Execute, don't ask.** Every candidate is provisioned in an isolated
-   sandbox and replayed against the same corpus the legacy service is replayed
-   against (`packages/execution`).
-4. **Compare, don't guess.** Candidate responses are compared to legacy
-   responses by HTTP status and recursive JSON field comparison — key order
-   and whitespace never create a false divergence.
+1. **Recover the rules.** Forge reads the legacy source and writes out a rules
+   file (`forge/rules.json`), the business rules the legacy system actually
+   follows, including the ones nobody wrote down.
+2. **Build a corpus.** A generator turns those rules into concrete test
+   inputs that target edge cases and boundaries (`packages/fixture`).
+3. **Run it, don't ask about it.** Every candidate is set up in its own
+   sandbox and run against the same corpus as the legacy service
+   (`packages/execution`).
+4. **Compare, don't guess.** Candidate responses are checked against legacy
+   responses by HTTP status and by comparing JSON fields directly. Key order
+   and whitespace never cause a false mismatch.
 5. **Scan before trusting.** Every candidate is scanned (Snyk) before its
-   comparison result is trusted; a scanner failure is a blocking error, never
-   a silent pass.
-6. **Decide with a pure function.** A deterministic policy function — no
-   clock, no database, no network, no model call — turns comparison and scan
+   comparison result is trusted. If the scan fails to run, that's a blocking
+   error, never a silent pass.
+6. **Decide with a plain function.** A policy function with no clock, no
+   database, no network, and no model call turns the comparison and scan
    results into a verdict.
-7. **Explain, don't decide.** A narration step describes the already-final
-   verdict in prose. It is handed the verdict and forbidden from
-   recomputing it.
-8. **Human approves.** A human reviews the evidence and approves or blocks.
-   Approval is atomic, only accepts a stored `RECOMMEND` verdict, and produces
-   a SHA-256 digest binding the rules, corpus, raw results, scans, gates, and
-   verdict together — so the report can't drift from what was actually run.
+7. **Explain, don't decide.** A narration step writes up the already-final
+   verdict in plain language. It's given the verdict and isn't allowed to
+   recompute it.
+8. **A human approves.** A person reviews the evidence and approves or blocks
+   it. Approval only accepts a stored `RECOMMEND` verdict and produces a
+   SHA-256 digest that ties the rules, test inputs, raw results, scans,
+   gates, and verdict together, so the report can't drift from what actually
+   ran.
 
 ## State machine
 
@@ -115,9 +116,9 @@ pnpm install
 
 ### Run the legacy and candidate fixtures
 
-Every fixture is a standalone standard-library HTTP service and starts with
-one command. Each listens on port 8080 unless `--port` (or `PORT`) is
-supplied.
+Each fixture is a standalone HTTP service (standard library only) and starts
+with one command. Each listens on port 8080 unless you pass `--port` or set
+`PORT`.
 
 ```sh
 python packages/fixture/legacy/server.py
@@ -144,20 +145,20 @@ against `fixtures/expected.json`, and checks the four audit totals.
 
 ### Run the interface against the mock
 
-`apps/control/src/mock-run.ts` is a runnable fake whose event shapes are the
-canonical wire format — every real module must match them. Run it and the web
-client in separate terminals:
+`apps/control/src/mock-run.ts` is a runnable fake. Its event shapes are the
+format every real module has to match. Run it and the web client in separate
+terminals:
 
 ```sh
 pnpm mock:serve
 pnpm dev:web
 ```
 
-The web client's development mode consumes the real SSE stream at
-`http://localhost:4000`; the bundle itself contains no synthetic run evidence.
-Set the values documented in `apps/web/.env.example` to point at another
-control origin or switch to the real API mode. See `apps/web/README.md` for
-the canonical event payload table.
+The web client's dev mode reads the real SSE stream at
+`http://localhost:4000`. The bundle itself contains no fake run evidence. Set
+the values in `apps/web/.env.example` to point at a different control origin,
+or switch to the real API mode. See `apps/web/README.md` for the full event
+payload table.
 
 ```sh
 pnpm --filter @intentguard/web typecheck
@@ -186,11 +187,11 @@ and reports:
 - `GET /api/runs/:id/report.json`
 - `GET /api/runs/:id/report.md`
 
-Real worker execution is composed by injecting the Forge, corpus, execution,
-scan, replay, narration, and teardown ports into `runWorkerLoop` — the API
-never substitutes the mock for a missing Forge or execution adapter. See
-`apps/control/README.md` for the full route list and event/evidence
-invariants.
+Real worker execution is built by injecting the Forge, corpus, execution,
+scan, replay, narration, and teardown ports into `runWorkerLoop`. The API
+never falls back to the mock if a Forge or execution adapter is missing. See
+`apps/control/README.md` for the full route list and the rules that govern
+events and evidence.
 
 ## Module ownership
 
@@ -203,17 +204,18 @@ strict to avoid three divergent codebases:
 | Neel | Everything that talks to a third party: Daytona, Snyk, RocketRide | `packages/execution` |
 | Bryan | Everything the user sees and everything being tested: legacy fixture, candidates, corpus, replay harness, frontend | `packages/fixture`, `apps/web` |
 
-`packages/contracts` is frozen and type-only — it changes only by
-announcement, and it must never gain a runtime value. Cross-module data flows
-through imported contract types, not by reaching into another owner's module.
+`packages/contracts` is frozen and type-only. It changes only when announced,
+and it must never hold a runtime value. Data flows between modules through
+imported contract types, not by reaching into another owner's module.
 
 ## Events
 
 Every module emits its own events. A function that takes `runId` as its first
-argument calls `emitEvent(runId, ...)` itself — Neel's adapter emits
-`SANDBOX_CREATED`, Laksh's worker does not emit it on Neel's behalf. Events
-are append-only and carry a monotonic `seq`; render from `seq` order, never
-arrival order. `source` tags each event with the platform that produced it.
+argument calls `emitEvent(runId, ...)` itself. For example, Neel's adapter
+emits `SANDBOX_CREATED`; Laksh's worker does not emit it on Neel's behalf.
+Events are append-only and carry a monotonic `seq`. Always render them in
+`seq` order, never in the order they arrive. `source` tags each event with
+the platform that produced it.
 
 ## Where fallbacks are and are not allowed
 
@@ -240,10 +242,10 @@ pnpm smoke:control-core  # real SQLite-backed control plane, end to end
 ## Non-negotiables
 
 - Strict TypeScript. No `any`, no unexplained `@ts-expect-error`.
-- All environment variables flow through `src/lib/env.ts` with a zod schema —
-  never read `process.env` directly.
+- All environment variables flow through `src/lib/env.ts` with a zod schema.
+  Never read `process.env` directly.
 - No silent error swallowing. A swallowed Snyk failure becomes a false
-  approval, which is the exact failure mode this product exists to prevent.
+  approval, which is exactly the failure this product exists to prevent.
 - No `process.exit()` outside `scripts/`.
 - Smoke tests live at `scripts/smoke-<module>.ts` and exit non-zero on
   failure.
