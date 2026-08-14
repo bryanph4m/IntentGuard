@@ -1,0 +1,11 @@
+{
+  "name": "@intentguard/control",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/mock-run.ts",
+  "dependencies": {
+    "@intentguard/contracts": "workspace:*",
+    "zod": "^4.1.5"
+  }
+}

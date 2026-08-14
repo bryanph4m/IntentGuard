@@ -1,0 +1,18 @@
+{
+  "name": "intentguard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "mock": "tsx apps/control/scripts/mock-print.ts",
+    "mock:serve": "tsx apps/control/scripts/mock-sse.ts",
+    "smoke:control": "tsx apps/control/scripts/smoke-control.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  }
+}
