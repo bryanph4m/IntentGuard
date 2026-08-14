@@ -32,6 +32,23 @@ export type CreateStoredRun = {
   createdAt?: string;
 };
 
+export type InterruptedRunState = Extract<
+  RunState,
+  "RULES_LOCKED" | "PROVISIONING" | "EVALUATING" | "AGGREGATING"
+>;
+
+export type InterruptedRunRecovery = {
+  runId: string;
+  previousState: InterruptedRunState;
+  reason: string;
+  verdict: Verdict;
+};
+
+export type StartupReconciliation = {
+  releasedDraftRunIds: string[];
+  interruptedRuns: InterruptedRunRecovery[];
+};
+
 const RUN_STATES = new Set<RunState>([
   "DRAFT",
   "RULES_LOCKED",
@@ -120,6 +137,19 @@ function parseJson<T>(source: string, context: string): T {
 function asRunState(value: string): RunState {
   if (!RUN_STATES.has(value as RunState)) throw new TypeError(`Unknown stored run state ${value}.`);
   return value as RunState;
+}
+
+function asInterruptedRunState(value: string): InterruptedRunState {
+  const state = asRunState(value);
+  if (
+    state !== "RULES_LOCKED"
+    && state !== "PROVISIONING"
+    && state !== "EVALUATING"
+    && state !== "AGGREGATING"
+  ) {
+    throw new TypeError(`Run state ${state} is not recoverable as an interrupted evaluation.`);
+  }
+  return state;
 }
 
 function asCandidateStatus(value: string): CandidateStatus {
@@ -401,6 +431,74 @@ export class ControlStore {
     this.database.prepare("UPDATE runs SET worker_claimed_at = NULL WHERE run_id = ?").run(runId);
   }
 
+  reconcileStartup(at = new Date().toISOString()): StartupReconciliation {
+    return this.transaction(() => {
+      const releasedDraftRunIds = this.database.prepare(`
+        SELECT run_id FROM runs
+        WHERE state = 'DRAFT' AND worker_claimed_at IS NOT NULL
+        ORDER BY created_at, run_id
+      `).all().map((row) => requiredString(row, "run_id"));
+      this.database.prepare(`
+        UPDATE runs SET worker_claimed_at = NULL
+        WHERE state = 'DRAFT' AND worker_claimed_at IS NOT NULL
+      `).run();
+
+      const interruptedRuns = this.database.prepare(`
+        SELECT run_id, state FROM runs
+        WHERE state IN ('RULES_LOCKED', 'PROVISIONING', 'EVALUATING', 'AGGREGATING')
+        ORDER BY created_at, run_id
+      `).all().map((row): InterruptedRunRecovery => {
+        const runId = requiredString(row, "run_id");
+        const previousState = asInterruptedRunState(requiredString(row, "state"));
+        const run = this.requireRun(runId);
+        const reason = `Control process restarted while run ${runId} was ${previousState}; interrupted evaluation cannot be resumed safely.`;
+        const candidateIds = this.database.prepare(`
+          SELECT candidate_id FROM candidates
+          WHERE run_id = ? AND candidate_id <> 'legacy'
+          ORDER BY commit_order, candidate_id
+        `).all(runId).map((candidate) => requiredString(candidate, "candidate_id"));
+        const verdict: Verdict = {
+          outcome: "INCONCLUSIVE",
+          recommended: null,
+          perCandidate: candidateIds.map((candidateId) => ({
+            candidateId,
+            eligible: false,
+            reasons: [reason],
+          })),
+          policyVersion: run.policyVersion,
+        };
+        this.database.prepare(`
+          INSERT INTO decisions (run_id, verdict_json, narration, persisted_at)
+          VALUES (?, ?, NULL, ?)
+          ON CONFLICT (run_id) DO UPDATE SET
+            verdict_json = excluded.verdict_json,
+            narration = NULL,
+            persisted_at = excluded.persisted_at
+        `).run(runId, JSON.stringify(verdict), at);
+        this.database.prepare(`
+          UPDATE runs
+          SET state = 'BLOCKED', updated_at = ?, worker_claimed_at = NULL
+          WHERE run_id = ?
+        `).run(at, runId);
+        this.database.prepare(`
+          UPDATE candidates
+          SET status = 'ENVIRONMENT_ERROR', failure_reason = ?
+          WHERE run_id = ?
+        `).run(reason, runId);
+        this.appendEventWithinTransaction(runId, {
+          ts: at,
+          source: "control",
+          type: "VERDICT_READY",
+          message: `Verdict: INCONCLUSIVE because ${reason}`,
+          payload: verdict,
+        });
+        return { runId, previousState, reason, verdict };
+      });
+
+      return { releasedDraftRunIds, interruptedRuns };
+    });
+  }
+
   updateCandidate(
     runId: string,
     candidateId: CandidateId,
@@ -612,40 +710,42 @@ export class ControlStore {
     };
   }
 
+  private appendEventWithinTransaction(runId: string, pending: PendingRunEvent): RunEvent {
+    this.requireRun(runId);
+    const row = this.database.prepare(
+      "SELECT COALESCE(MAX(seq), 0) AS last_seq FROM events WHERE run_id = ?",
+    ).get(runId);
+    if (row === undefined) throw new Error(`Could not allocate an event sequence for run ${runId}.`);
+    const seq = requiredNumber(row, "last_seq") + 1;
+    const ts = pending.ts ?? new Date().toISOString();
+    this.database.prepare(`
+      INSERT INTO events (
+        run_id, seq, ts, source, type, candidate_id, message, payload_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      runId,
+      seq,
+      ts,
+      pending.source,
+      pending.type,
+      pending.candidateId ?? null,
+      pending.message,
+      pending.payload === undefined ? null : JSON.stringify(pending.payload),
+    );
+    const stored: RunEvent = {
+      seq,
+      ts,
+      source: pending.source,
+      type: pending.type,
+      message: pending.message,
+    };
+    if (pending.candidateId !== undefined) stored.candidateId = pending.candidateId;
+    if (pending.payload !== undefined) stored.payload = pending.payload;
+    return stored;
+  }
+
   appendEvent(runId: string, pending: PendingRunEvent): RunEvent {
-    const event = this.transaction(() => {
-      this.requireRun(runId);
-      const row = this.database.prepare(
-        "SELECT COALESCE(MAX(seq), 0) AS last_seq FROM events WHERE run_id = ?",
-      ).get(runId);
-      if (row === undefined) throw new Error(`Could not allocate an event sequence for run ${runId}.`);
-      const seq = requiredNumber(row, "last_seq") + 1;
-      const ts = pending.ts ?? new Date().toISOString();
-      this.database.prepare(`
-        INSERT INTO events (
-          run_id, seq, ts, source, type, candidate_id, message, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        runId,
-        seq,
-        ts,
-        pending.source,
-        pending.type,
-        pending.candidateId ?? null,
-        pending.message,
-        pending.payload === undefined ? null : JSON.stringify(pending.payload),
-      );
-      const stored: RunEvent = {
-        seq,
-        ts,
-        source: pending.source,
-        type: pending.type,
-        message: pending.message,
-      };
-      if (pending.candidateId !== undefined) stored.candidateId = pending.candidateId;
-      if (pending.payload !== undefined) stored.payload = pending.payload;
-      return stored;
-    });
+    const event = this.transaction(() => this.appendEventWithinTransaction(runId, pending));
     this.events.emit(`run:${runId}`, event);
     return event;
   }

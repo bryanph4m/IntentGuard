@@ -34,6 +34,68 @@ export type ListeningControlServer = {
   close: () => Promise<void>;
 };
 
+class BackgroundTasks {
+  private readonly requests = new Set<Promise<void>>();
+  private readonly tasks = new Set<Promise<void>>();
+  private readonly unreportedFailures: unknown[] = [];
+
+  trackRequest(work: Promise<void>): void {
+    let tracked: Promise<void>;
+    tracked = work
+      .catch((error: unknown) => {
+        this.unreportedFailures.push(
+          new Error("Control request error handling failed.", { cause: error }),
+        );
+      })
+      .finally(() => this.requests.delete(tracked));
+    this.requests.add(tracked);
+  }
+
+  schedule(
+    description: string,
+    work: () => Promise<void>,
+    onError: ((error: unknown) => void) | undefined,
+  ): void {
+    let tracked: Promise<void>;
+    tracked = Promise.resolve()
+      .then(work)
+      .catch((error: unknown) => {
+        const contextual = new Error(`${description} failed.`, { cause: error });
+        if (onError === undefined) {
+          this.unreportedFailures.push(contextual);
+          return;
+        }
+        try {
+          onError(contextual);
+        } catch (reportingError: unknown) {
+          this.unreportedFailures.push(
+            new AggregateError(
+              [contextual, reportingError],
+              `${description} failed and its error reporter also failed.`,
+            ),
+          );
+        }
+      })
+      .finally(() => this.tasks.delete(tracked));
+    this.tasks.add(tracked);
+  }
+
+  async waitForIdle(): Promise<void> {
+    while (this.requests.size !== 0) await Promise.all([...this.requests]);
+    while (this.tasks.size !== 0) await Promise.all([...this.tasks]);
+    if (this.unreportedFailures.length !== 0) {
+      throw new AggregateError(
+        this.unreportedFailures,
+        "Control server background tasks had unreported failures.",
+      );
+    }
+  }
+}
+
+type RouteOptions = ControlServerOptions & { backgroundTasks: BackgroundTasks };
+
+const serverBackgroundTasks = new WeakMap<Server, BackgroundTasks>();
+
 const approvalRequestSchema = z.object({
   reviewer: z.string().min(1),
   comment: z.string().min(1),
@@ -116,6 +178,9 @@ function streamEvents(
   let lastSent = parsedAfter;
   let closed = false;
   let buffering = true;
+  const previouslySent = store.listEvents(runId).filter((event) => event.seq <= parsedAfter);
+  let verdictSent = previouslySent.some((event) => event.type === "VERDICT_READY");
+  let teardownSent = previouslySent.some((event) => event.type === "TORN_DOWN");
   const buffered: RunEvent[] = [];
   let keepAlive: NodeJS.Timeout | undefined;
   let unsubscribe: (() => void) | undefined;
@@ -132,7 +197,9 @@ function streamEvents(
     if (closed || event.seq <= lastSent) return;
     response.write(eventRecord(event));
     lastSent = event.seq;
-    if (event.type === "TORN_DOWN") close();
+    if (event.type === "VERDICT_READY") verdictSent = true;
+    if (event.type === "TORN_DOWN") teardownSent = true;
+    if (verdictSent && teardownSent) close();
   };
 
   response.writeHead(200, {
@@ -149,6 +216,7 @@ function streamEvents(
   for (const event of store.listEvents(runId, parsedAfter)) send(event);
   buffering = false;
   buffered.sort((left, right) => left.seq - right.seq).forEach(send);
+  if (verdictSent && teardownSent) close();
   if (closed) return;
   keepAlive = setInterval(() => {
     if (!closed) response.write(": keep-alive\n\n");
@@ -160,7 +228,7 @@ function streamEvents(
 async function route(
   request: IncomingMessage,
   response: ServerResponse,
-  options: ControlServerOptions,
+  options: RouteOptions,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://control.local");
   if (request.method === "OPTIONS") {
@@ -222,11 +290,11 @@ async function route(
       throw new HttpError(409, error instanceof Error ? error.message : String(error));
     }
     if (options.afterApproval !== undefined) {
-      try {
-        await options.afterApproval(runId);
-      } catch (error: unknown) {
-        options.onError?.(new Error(`Post-approval teardown failed for run ${runId}.`, { cause: error }));
-      }
+      options.backgroundTasks.schedule(
+        `Post-approval teardown for run ${runId}`,
+        () => options.afterApproval?.(runId) ?? Promise.resolve(),
+        options.onError,
+      );
     }
     json(response, 200, receipt);
     return;
@@ -260,8 +328,9 @@ async function route(
 }
 
 export function createControlServer(options: ControlServerOptions): Server {
-  return createServer((request, response) => {
-    void route(request, response, options).catch((error: unknown) => {
+  const backgroundTasks = new BackgroundTasks();
+  const server = createServer((request, response) => {
+    const requestTask = route(request, response, { ...options, backgroundTasks }).catch((error: unknown) => {
       if (response.headersSent) {
         options.onError?.(error);
         if (!response.writableEnded) response.end();
@@ -275,7 +344,10 @@ export function createControlServer(options: ControlServerOptions): Server {
         message: status === 500 ? "The control API could not complete the request." : message,
       });
     });
+    backgroundTasks.trackRequest(requestTask);
   });
+  serverBackgroundTasks.set(server, backgroundTasks);
+  return server;
 }
 
 export async function listenControlServer(
@@ -296,12 +368,20 @@ export async function listenControlServer(
     throw new Error("Control server did not expose a TCP address.");
   }
   const { port: listeningPort } = address as AddressInfo;
+  const backgroundTasks = serverBackgroundTasks.get(server);
+  if (backgroundTasks === undefined) {
+    server.close();
+    throw new Error("Control server background task tracking was not configured.");
+  }
   return {
     server,
     url: `http://${host}:${String(listeningPort)}`,
-    close: () => new Promise<void>((resolve, reject) => {
-      server.close((error) => error === undefined ? resolve() : reject(error));
-      server.closeAllConnections();
-    }),
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error === undefined ? resolve() : reject(error));
+        server.closeAllConnections();
+      });
+      await backgroundTasks.waitForIdle();
+    },
   };
 }

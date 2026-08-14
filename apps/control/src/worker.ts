@@ -11,7 +11,7 @@ import type {
 } from "@intentguard/contracts";
 import { compareRun } from "./comparison.js";
 import { emitEvent } from "./lib/events.js";
-import type { ControlStore } from "./lib/store.js";
+import type { ControlStore, StartupReconciliation } from "./lib/store.js";
 import { decideRun } from "./policy.js";
 
 export type ReadinessResult = {
@@ -171,17 +171,19 @@ export async function evaluateRun(
   options: WorkerOptions = {},
 ): Promise<Verdict> {
   const run = store.requireRun(runId);
-  if (run.state !== "DRAFT") throw new Error(`Worker expected run ${runId} to be DRAFT, got ${run.state}.`);
+  if (run.state !== "DRAFT") {
+    throw new Error(`Worker expected run ${runId} to be DRAFT, got ${run.state}.`);
+  }
   const allCandidateIds = store.getCandidates(runId).map((candidate) => candidate.candidateId);
   const modernCandidateIds = allCandidateIds.filter((candidateId) => candidateId !== "legacy");
-  if (!allCandidateIds.includes("legacy")) throw new Error(`Run ${runId} has no legacy baseline.`);
-  if (modernCandidateIds.length === 0) throw new Error(`Run ${runId} has no rewrite candidates.`);
   const blockingSeverity = options.blockingSeverity ?? "high";
 
   let teardownError: unknown;
   let primaryError: unknown;
   let retainForApproval = false;
   try {
+    if (!allCandidateIds.includes("legacy")) throw new Error(`Run ${runId} has no legacy baseline.`);
+    if (modernCandidateIds.length === 0) throw new Error(`Run ${runId} has no rewrite candidates.`);
     const rules = await dependencies.loadRules(runId);
     if (rules.length === 0) throw new Error("Forge returned no locked rules.");
     store.saveRules(runId, rules);
@@ -400,6 +402,34 @@ export async function teardownApprovedRun(
   await dependencies.teardown(runId);
 }
 
+export async function reconcileStartupRuns(
+  store: ControlStore,
+  dependencies: Pick<WorkerDependencies, "teardown">,
+  onError: (runId: string, error: unknown) => void,
+): Promise<StartupReconciliation> {
+  const reconciliation = store.reconcileStartup();
+  const teardownResults = await Promise.allSettled(
+    reconciliation.interruptedRuns.map(
+      (interrupted) => dependencies.teardown(interrupted.runId),
+    ),
+  );
+  teardownResults.forEach((result, index) => {
+    if (result.status === "fulfilled") return;
+    const interrupted = reconciliation.interruptedRuns[index];
+    if (interrupted === undefined) {
+      throw new Error("Startup teardown result had no matching interrupted run.");
+    }
+    onError(
+      interrupted.runId,
+      new Error(
+        `Startup recovery persisted ${interrupted.runId} as INCONCLUSIVE but teardown failed.`,
+        { cause: result.reason },
+      ),
+    );
+  });
+  return reconciliation;
+}
+
 function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
     const onAbort = (): void => {
@@ -420,6 +450,7 @@ export async function runWorkerLoop(
   dependencies: WorkerDependencies,
   signal: AbortSignal,
   onError: (runId: string, error: unknown) => void,
+  options: WorkerOptions = {},
   pollMilliseconds = 250,
 ): Promise<void> {
   while (!signal.aborted) {
@@ -429,7 +460,7 @@ export async function runWorkerLoop(
       continue;
     }
     try {
-      await evaluateRun(runId, store, dependencies);
+      await evaluateRun(runId, store, dependencies, options);
     } catch (error: unknown) {
       onError(runId, error);
     }

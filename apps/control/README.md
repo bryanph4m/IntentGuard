@@ -13,6 +13,8 @@ reports. The committed mock remains a separate development path.
 Forge artifacts are intentionally not synthesized by this package. If the
 rules export is absent or invalid, `GET /api/rules` and worker rule loading fail
 with the artifact path and parse context instead of substituting demo data.
+Relative `FORGE_RULES_PATH` values are resolved from the repository root, not
+from the package-manager working directory.
 
 ## Real API
 
@@ -21,6 +23,12 @@ From the repository root:
 ```sh
 pnpm dev:control
 ```
+
+This is intentionally a `tsx` source entrypoint. The execution package imports
+the control event-writer source, so emitting a plain-Node `serve-control.js`
+artifact would risk loading source-only workspace exports or a second event
+writer singleton. The control build emits the library and Node-based smoke
+artifacts, but excludes the deployed server script.
 
 Configuration is documented in the root `.env.example`. The server enables
 SQLite WAL mode for file-backed databases and exposes:
@@ -34,16 +42,30 @@ SQLite WAL mode for file-backed databases and exposes:
 - `GET /api/runs/:id/report.json`
 - `GET /api/runs/:id/report.md`
 
-`POST /api/runs` persists a `DRAFT` run. The worker is composed separately by
-injecting the Forge, corpus, execution, scan, replay, narration, and teardown
-ports into `runWorkerLoop`. This separation keeps the real path honest while
-the execution package is integrated; the API never fabricates execution or
-scan evidence.
+`POST /api/runs` persists a `DRAFT` run. The production entrypoint starts
+`runWorkerLoop`, which claims queued drafts and composes the fixture corpus and
+replay exports with the execution provision, scan, narration, and teardown
+exports. `CONTROL_BLOCKING_SEVERITY` is passed into the deterministic policy
+path.
 
-Recommended runs retain their sandboxes during human review. A server
-composition can pass `afterApproval` and call `teardownApprovedRun` so the
-execution adapter emits `TORN_DOWN` only after `APPROVED`. Blocked and failed
-runs are torn down by the worker immediately.
+At startup, stale claims on `DRAFT` runs are released so the worker can reclaim
+them. Runs interrupted in `RULES_LOCKED`, `PROVISIONING`, `EVALUATING`, or
+`AGGREGATING` are atomically persisted as `BLOCKED` with an `INCONCLUSIVE`
+verdict and contextual candidate failures. Their run IDs are then handed to
+execution teardown. Teardown errors are reported and never converted into a
+synthetic `TORN_DOWN`. Reconciliation assumes one active control process per
+database; do not overlap two servers against the same SQLite file.
+
+Execution provision returns only after dependency installation, app startup,
+and its health probe succeed. The control composition requires both the
+persisted sandbox reference and its matching `APP_HEALTHY` event before
+creating explicit build and health gates; it does not issue a mismatched
+second-port probe or manufacture a pass after a provision failure.
+
+Recommended runs retain their sandboxes during human review. Approval persists
+and returns its receipt before scheduling teardown. The server tracks that task
+and waits for it during shutdown; only the execution adapter can emit
+`TORN_DOWN`. Blocked and failed runs are torn down by the worker immediately.
 
 ## Event and evidence invariants
 
@@ -53,6 +75,9 @@ runs are torn down by the worker immediately.
   order and whitespace do not create false divergences.
 - Policy is a pure function with no clock, database, network, or model call.
 - A verdict is stored before `VERDICT_READY` and before narration.
+- SSE closes only after both `VERDICT_READY` and `TORN_DOWN` have been observed,
+  in either order. This preserves a post-cleanup INCONCLUSIVE verdict when
+  execution tears down during a provisioning failure.
 - Approval is atomic and only accepts a stored `RECOMMEND` verdict in
   `AWAITING_APPROVAL`.
 - Approval SHA-256 binds canonical rules, corpus, raw results, scans, gates,

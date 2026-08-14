@@ -23,6 +23,8 @@
   },
   "dependencies": {
     "@intentguard/contracts": "workspace:*",
+    "@intentguard/execution": "workspace:*",
+    "@intentguard/fixture": "workspace:*",
     "zod": "^4.1.5"
   },
   "devDependencies": {

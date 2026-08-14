@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type {
   CandidateId,
   CorpusInput,
@@ -14,17 +14,25 @@ import type {
 } from "@intentguard/contracts";
 import { approvalIsValid } from "../src/approval.js";
 import { compare } from "../src/comparison.js";
+import {
+  composeProductionWorkerDependencies,
+  type ProductionWorkerPorts,
+} from "../src/composition.js";
 import { configureEventWriter, emitEvent, resetEventWriter } from "../src/lib/events.js";
+import { resolveRepositoryPath } from "../src/lib/paths.js";
 import { ControlStore } from "../src/lib/store.js";
 import { decide } from "../src/policy.js";
 import { loadRulesFile } from "../src/rules.js";
 import { createControlServer, listenControlServer } from "../src/server.js";
 import {
   evaluateRun,
+  reconcileStartupRuns,
   runWorkerLoop,
   teardownApprovedRun,
   type WorkerDependencies,
 } from "../src/worker.js";
+
+type InterruptedState = "RULES_LOCKED" | "PROVISIONING" | "EVALUATING" | "AGGREGATING";
 
 const rules: Rule[] = [{
   id: "REQ-014",
@@ -81,7 +89,7 @@ function scan(candidateId: CandidateId): ScanResult {
 }
 
 function buildDependencies(store: ControlStore): WorkerDependencies {
-  return {
+  const ports: ProductionWorkerPorts = {
     loadRules: async () => rules,
     generateCorpus: () => corpus,
     provision: async (runId, candidateIds) => candidateIds.map((candidateId) => {
@@ -93,9 +101,6 @@ function buildDependencies(store: ControlStore): WorkerDependencies {
         message: `Created ${reference.sandboxId}.`,
         payload: reference,
       });
-      return reference;
-    }),
-    verify: async (runId, reference) => {
       emitEvent(runId, {
         source: "daytona",
         type: "APP_HEALTHY",
@@ -103,11 +108,8 @@ function buildDependencies(store: ControlStore): WorkerDependencies {
         message: `${reference.candidateId} is healthy.`,
         payload: { previewUrl: reference.previewUrl },
       });
-      return {
-        build: { passed: true, detail: "build passed" },
-        health: { passed: true, detail: "health check passed" },
-      };
-    },
+      return reference;
+    }),
     replay: async (runId, _previewUrl, _corpus, candidateId) => {
       const results = replay(candidateId);
       emitEvent(runId, {
@@ -149,6 +151,43 @@ function buildDependencies(store: ControlStore): WorkerDependencies {
       });
     },
   };
+  return composeProductionWorkerDependencies(store, ports);
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  description: string,
+  timeoutMilliseconds = 2_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}.`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function advanceRunTo(store: ControlStore, runId: string, target: InterruptedState): void {
+  store.transitionRun(runId, "RULES_LOCKED");
+  if (target === "RULES_LOCKED") return;
+  store.transitionRun(runId, "PROVISIONING");
+  if (target === "PROVISIONING") return;
+  store.transitionRun(runId, "EVALUATING");
+  if (target === "EVALUATING") return;
+  store.transitionRun(runId, "AGGREGATING");
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let release: (() => void) | undefined;
+  const promise = new Promise<void>((resolvePromise) => {
+    release = resolvePromise;
+  });
+  return {
+    promise,
+    resolve: () => {
+      if (release === undefined) throw new Error("Deferred promise was not initialized.");
+      release();
+    },
+  };
 }
 
 function eventData(stream: string): RunEvent[] {
@@ -170,6 +209,106 @@ try {
   assert.deepEqual(await loadRulesFile(rulesPath), rules);
   writeFileSync(rulesPath, "not-json", "utf8");
   await assert.rejects(loadRulesFile(rulesPath), /not valid JSON/u);
+
+  const fakeControlRoot = join(temporaryDirectory, "repository", "apps", "control");
+  assert.equal(
+    resolveRepositoryPath("forge/rules.json", fakeControlRoot),
+    resolve(temporaryDirectory, "repository", "forge", "rules.json"),
+  );
+  assert.equal(resolveRepositoryPath(rulesPath, fakeControlRoot), resolve(rulesPath));
+
+  const restartPath = join(temporaryDirectory, "restart.sqlite");
+  let restartStore: ControlStore | undefined = new ControlStore(restartPath);
+  try {
+    resetEventWriter();
+    configureEventWriter(restartStore);
+    restartStore.createRun({
+      runId: "RUN-restart-draft",
+      snapshotId: "snapshot-smoke",
+      corpusVersion: "corpus-smoke",
+      policyVersion: "policy-smoke",
+      candidateIds: ["legacy", "A"],
+    });
+    assert.equal(restartStore.claimNextDraftRun(), "RUN-restart-draft");
+    const interruptedStates: InterruptedState[] = [
+      "RULES_LOCKED",
+      "PROVISIONING",
+      "EVALUATING",
+      "AGGREGATING",
+    ];
+    for (const state of interruptedStates) {
+      const runId = `RUN-restart-${state.toLowerCase()}`;
+      restartStore.createRun({
+        runId,
+        snapshotId: "snapshot-smoke",
+        corpusVersion: "corpus-smoke",
+        policyVersion: "policy-smoke",
+        candidateIds: ["legacy", "A"],
+      });
+      advanceRunTo(restartStore, runId, state);
+    }
+    const teardownFailureRunId = "RUN-restart-teardown-failure";
+    restartStore.createRun({
+      runId: teardownFailureRunId,
+      snapshotId: "snapshot-smoke",
+      corpusVersion: "corpus-smoke",
+      policyVersion: "policy-smoke",
+      candidateIds: ["legacy", "A"],
+    });
+    advanceRunTo(restartStore, teardownFailureRunId, "PROVISIONING");
+    restartStore.close();
+    restartStore = undefined;
+
+    restartStore = new ControlStore(restartPath);
+    resetEventWriter();
+    configureEventWriter(restartStore);
+    const recoveredTeardowns: string[] = [];
+    const recoveryErrors: Array<{ runId: string; error: unknown }> = [];
+    const recovery = await reconcileStartupRuns(
+      restartStore,
+      {
+        teardown: async (runId) => {
+          recoveredTeardowns.push(runId);
+          if (runId === teardownFailureRunId) throw new Error("Daytona credentials unavailable");
+          emitEvent(runId, {
+            source: "daytona",
+            type: "TORN_DOWN",
+            message: `Recovered teardown for ${runId}.`,
+          });
+        },
+      },
+      (runId, error) => recoveryErrors.push({ runId, error }),
+    );
+    assert.deepEqual(recovery.releasedDraftRunIds, ["RUN-restart-draft"]);
+    assert.equal(restartStore.claimNextDraftRun(), "RUN-restart-draft");
+    restartStore.releaseClaim("RUN-restart-draft");
+    restartStore.failRun("RUN-restart-draft", "restart claim smoke complete");
+    assert.equal(recovery.interruptedRuns.length, interruptedStates.length + 1);
+    assert.equal(recoveredTeardowns.length, interruptedStates.length + 1);
+    for (const interrupted of recovery.interruptedRuns) {
+      assert.equal(restartStore.requireRun(interrupted.runId).state, "BLOCKED");
+      assert.equal(restartStore.getVerdict(interrupted.runId)?.outcome, "INCONCLUSIVE");
+      assert.match(interrupted.reason, new RegExp(interrupted.previousState, "u"));
+      assert.ok(
+        restartStore.getCandidates(interrupted.runId)
+          .every((candidate) => candidate.status === "ENVIRONMENT_ERROR"),
+      );
+    }
+    assert.equal(recoveryErrors.length, 1);
+    assert.equal(recoveryErrors[0]?.runId, teardownFailureRunId);
+    assert.match(
+      recoveryErrors[0]?.error instanceof Error ? recoveryErrors[0].error.message : "",
+      /persisted.+INCONCLUSIVE but teardown failed/u,
+    );
+    assert.deepEqual(
+      restartStore.listEvents(teardownFailureRunId).map((event) => event.type),
+      ["VERDICT_READY"],
+    );
+  } finally {
+    restartStore?.close();
+    resetEventWriter();
+    configureEventWriter(store);
+  }
 
   const legacy = replay("legacy");
   const divergent = replay("A").map((result) => ({
@@ -230,7 +369,63 @@ try {
   assert.equal(scannerError.outcome, "BLOCKED");
 
   const dependencies = buildDependencies(store);
+  const unattestedRunId = "RUN-readiness-attestation-smoke";
+  store.createRun({
+    runId: unattestedRunId,
+    snapshotId: "snapshot-smoke",
+    corpusVersion: "corpus-smoke",
+    policyVersion: "policy-smoke",
+    candidateIds: ["legacy", "A"],
+  });
+  const unattestedSandbox = sandbox(unattestedRunId, "A");
+  store.updateCandidate(unattestedRunId, "A", { status: "READY", sandbox: unattestedSandbox });
+  const unattestedReadiness = await dependencies.verify(unattestedRunId, unattestedSandbox);
+  assert.equal(unattestedReadiness.build.passed, false);
+  assert.equal(unattestedReadiness.health.passed, false);
+  assert.match(unattestedReadiness.health.detail, /no matching APP_HEALTHY execution evidence/u);
+  emitEvent(unattestedRunId, {
+    source: "daytona",
+    type: "APP_HEALTHY",
+    candidateId: "A",
+    message: "A is healthy.",
+    payload: { previewUrl: unattestedSandbox.previewUrl },
+  });
+  assert.equal((await dependencies.verify(unattestedRunId, unattestedSandbox)).health.passed, true);
+  await assert.rejects(
+    dependencies.verify(unattestedRunId, {
+      ...unattestedSandbox,
+      previewUrl: "http://mutated.smoke.local",
+    }),
+    /is not the persisted provision result/u,
+  );
+  store.failRun(unattestedRunId, "readiness attestation smoke complete");
+
+  const readinessFailureRunId = "RUN-readiness-failure-smoke";
+  store.createRun({
+    runId: readinessFailureRunId,
+    snapshotId: "snapshot-smoke",
+    corpusVersion: "corpus-smoke",
+    policyVersion: "policy-smoke",
+    candidateIds: ["legacy", "A"],
+  });
+  const readinessFailureVerdict = await evaluateRun(readinessFailureRunId, store, {
+    ...dependencies,
+    provision: async (runId, candidateIds) => candidateIds.map(
+      (candidateId) => sandbox(runId, candidateId),
+    ),
+  });
+  assert.equal(readinessFailureVerdict.outcome, "INCONCLUSIVE");
+  const failedReadinessGates = store.getGates(readinessFailureRunId);
+  assert.deepEqual(
+    failedReadinessGates
+      .filter((gate) => gate.candidateId === "A")
+      .map((gate) => [gate.key, gate.status]),
+    [["build", "FAIL"], ["health", "FAIL"]],
+  );
+
   const serverErrors: unknown[] = [];
+  const approvalBarriers = new Map<string, Promise<void>>();
+  const approvalTeardownFailures = new Set<string>();
   const server = createControlServer({
     store,
     defaults: {
@@ -240,7 +435,13 @@ try {
       candidateIds: ["legacy", "A", "B"],
     },
     loadRules: async () => rules,
-    afterApproval: async (runId) => teardownApprovedRun(runId, store, dependencies),
+    afterApproval: async (runId) => {
+      await approvalBarriers.get(runId);
+      if (approvalTeardownFailures.has(runId)) {
+        throw new Error(`teardown transport failed for ${runId}`);
+      }
+      await teardownApprovedRun(runId, store, dependencies);
+    },
     onError: (error) => serverErrors.push(error),
   });
   const listening = await listenControlServer(server, 0);
@@ -249,19 +450,77 @@ try {
     const health = await fetch(`${listening.url}/health`);
     assert.equal(health.status, 200);
 
+    const teardownFirstRunId = "RUN-teardown-before-verdict-smoke";
+    store.createRun({
+      runId: teardownFirstRunId,
+      snapshotId: "snapshot-smoke",
+      corpusVersion: "corpus-smoke",
+      policyVersion: "policy-smoke",
+      candidateIds: ["legacy", "A"],
+    });
+    emitEvent(teardownFirstRunId, {
+      source: "daytona",
+      type: "TORN_DOWN",
+      message: "Provisioning failure cleanup completed.",
+    });
+    emitEvent(teardownFirstRunId, {
+      source: "control",
+      type: "VERDICT_READY",
+      message: "Verdict: INCONCLUSIVE because provisioning failed.",
+    });
+    const teardownFirstStream = await fetch(
+      `${listening.url}/api/runs/${teardownFirstRunId}/events`,
+    );
+    assert.deepEqual(
+      eventData(await teardownFirstStream.text()).map((event) => event.type),
+      ["TORN_DOWN", "VERDICT_READY"],
+    );
+    store.failRun(teardownFirstRunId, "provisioning failed");
+
     const created = await fetch(`${listening.url}/api/runs`, { method: "POST" });
     assert.equal(created.status, 201);
     const createdBody = await created.json() as { runId: string };
     assert.match(createdBody.runId, /^RUN-/u);
 
-    const verdict = await evaluateRun(createdBody.runId, store, dependencies, {
-      blockingSeverity: "high",
-    });
+    const workerController = new AbortController();
+    const workerErrors: Array<{ runId: string; error: unknown }> = [];
+    const workerPromise = runWorkerLoop(
+      store,
+      dependencies,
+      workerController.signal,
+      (runId, error) => workerErrors.push({ runId, error }),
+      { blockingSeverity: "low" },
+      1,
+    );
+    try {
+      await waitFor(
+        () => store.requireRun(createdBody.runId).state === "AWAITING_APPROVAL",
+        "the production-composed worker to claim and evaluate the queued run",
+      );
+    } finally {
+      workerController.abort();
+      await workerPromise;
+    }
+    assert.deepEqual(workerErrors, []);
+    assert.equal(getEventListeners(workerController.signal, "abort").length, 0);
+    const verdict = store.getVerdict(createdBody.runId);
+    assert.ok(verdict !== undefined);
     assert.equal(verdict.outcome, "RECOMMEND");
     assert.equal(verdict.recommended, "A");
     assert.equal(store.requireRun(createdBody.runId).state, "AWAITING_APPROVAL");
     assert.equal(store.listEvents(createdBody.runId).some((event) => event.type === "TORN_DOWN"), false);
+    assert.match(
+      store.getGates(createdBody.runId).find((gate) => gate.key === "build")?.detail ?? "",
+      /execution reached APP_HEALTHY.+after dependency installation/u,
+    );
+    assert.match(
+      store.getGates(createdBody.runId)
+        .find((gate) => gate.candidateId === "A" && gate.key === "security")?.detail ?? "",
+      /no findings at or above low/u,
+    );
 
+    const approvalBarrier = deferred();
+    approvalBarriers.set(createdBody.runId, approvalBarrier.promise);
     const approval = await fetch(`${listening.url}/api/runs/${createdBody.runId}/approve`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -272,6 +531,23 @@ try {
     assert.match(approvalBody.digest, /^[0-9a-f]{64}$/u);
     assert.equal(store.requireRun(createdBody.runId).state, "APPROVED");
     assert.equal(approvalIsValid(createdBody.runId, store), true);
+    assert.equal(
+      store.listEvents(createdBody.runId).some((event) => event.type === "TORN_DOWN"),
+      false,
+    );
+    approvalBarrier.resolve();
+    await waitFor(
+      () => store.listEvents(createdBody.runId).some((event) => event.type === "TORN_DOWN"),
+      "scheduled post-approval teardown",
+    );
+    const approvedEventCount = store.listEvents(createdBody.runId).length;
+    await assert.rejects(
+      evaluateRun(createdBody.runId, store, dependencies),
+      /expected run.+to be DRAFT, got APPROVED/u,
+    );
+    assert.equal(store.requireRun(createdBody.runId).state, "APPROVED");
+    assert.equal(store.getVerdict(createdBody.runId)?.outcome, "RECOMMEND");
+    assert.equal(store.listEvents(createdBody.runId).length, approvedEventCount);
 
     const duplicateApproval = await fetch(`${listening.url}/api/runs/${createdBody.runId}/approve`, {
       method: "POST",
@@ -337,6 +613,38 @@ try {
     assert.equal(store.listEvents(failedRunId).at(-1)?.type, "TORN_DOWN");
     assert.equal(serverErrors.length, 0);
 
+    const approvalFailureRunId = "RUN-approval-teardown-failure-smoke";
+    store.createRun({
+      runId: approvalFailureRunId,
+      snapshotId: "snapshot-smoke",
+      corpusVersion: "corpus-smoke",
+      policyVersion: "policy-smoke",
+      candidateIds: ["legacy", "A"],
+    });
+    assert.equal(
+      (await evaluateRun(approvalFailureRunId, store, dependencies)).outcome,
+      "RECOMMEND",
+    );
+    approvalTeardownFailures.add(approvalFailureRunId);
+    const failedTeardownApproval = await fetch(
+      `${listening.url}/api/runs/${approvalFailureRunId}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reviewer: "Laksh", comment: "Failure visibility smoke." }),
+      },
+    );
+    assert.equal(failedTeardownApproval.status, 200);
+    await waitFor(() => serverErrors.length === 1, "post-approval teardown error reporting");
+    assert.match(
+      serverErrors[0] instanceof Error ? serverErrors[0].message : "",
+      /Post-approval teardown.+failed/u,
+    );
+    assert.equal(
+      store.listEvents(approvalFailureRunId).some((event) => event.type === "TORN_DOWN"),
+      false,
+    );
+
     const degradedRunId = "RUN-degraded-smoke";
     store.createRun({
       runId: degradedRunId,
@@ -357,13 +665,6 @@ try {
     assert.equal(degradedVerdict.outcome, "INCONCLUSIVE");
     assert.equal(store.requireRun(degradedRunId).state, "BLOCKED");
 
-    const controller = new AbortController();
-    setTimeout(() => controller.abort(), 10);
-    await runWorkerLoop(store, dependencies, controller.signal, (runId, error) => {
-      throw new Error(`Unexpected worker error for ${runId}.`, { cause: error });
-    }, 1);
-    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
-
     store.saveGates(createdBody.runId, [{
       candidateId: "A",
       key: "behavior.REQ-014",
@@ -375,13 +676,42 @@ try {
     }]);
     assert.equal(approvalIsValid(createdBody.runId, store), false);
 
+    const shutdownRun = await fetch(`${listening.url}/api/runs`, { method: "POST" });
+    const shutdownRunBody = await shutdownRun.json() as { runId: string };
+    assert.equal(
+      (await evaluateRun(shutdownRunBody.runId, store, dependencies)).outcome,
+      "RECOMMEND",
+    );
+    const shutdownBarrier = deferred();
+    approvalBarriers.set(shutdownRunBody.runId, shutdownBarrier.promise);
+    const shutdownApproval = await fetch(
+      `${listening.url}/api/runs/${shutdownRunBody.runId}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reviewer: "Laksh", comment: "Shutdown tracking smoke." }),
+      },
+    );
+    assert.equal(shutdownApproval.status, 200);
+
     const openRun = await fetch(`${listening.url}/api/runs`, { method: "POST" });
     const openRunBody = await openRun.json() as { runId: string };
     const openStream = await fetch(`${listening.url}/api/runs/${openRunBody.runId}/events`);
     const drained = openStream.text().catch((error: unknown) => String(error));
-    await listening.close();
+    let closeFinished = false;
+    const closePromise = listening.close().then(() => {
+      closeFinished = true;
+    });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    assert.equal(closeFinished, false);
+    shutdownBarrier.resolve();
+    await closePromise;
     listeningClosed = true;
     await drained;
+    assert.equal(
+      store.listEvents(shutdownRunBody.runId).some((event) => event.type === "TORN_DOWN"),
+      true,
+    );
   } finally {
     if (!listeningClosed) await listening.close();
   }
