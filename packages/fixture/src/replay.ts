@@ -1,22 +1,29 @@
-import type { CorpusInput, RawResult } from "./types.js";
+import type {
+  CandidateId,
+  CorpusInput,
+  RawResult,
+} from "@intentguard/contracts";
 
 export const REPLAY_TIMEOUT_MS = 5_000;
 
 type ReplayErrorContext = {
-  candidateId: string;
+  runId: string;
+  candidateId: CandidateId;
   inputId: string;
   url: string;
   cause: unknown;
 };
 
 export class ReplayRequestError extends Error {
-  readonly candidateId: string;
+  readonly runId: string;
+  readonly candidateId: CandidateId;
   readonly inputId: string;
   readonly url: string;
 
   constructor(message: string, context: ReplayErrorContext) {
     super(message, { cause: context.cause });
     this.name = "ReplayRequestError";
+    this.runId = context.runId;
     this.candidateId = context.candidateId;
     this.inputId = context.inputId;
     this.url = context.url;
@@ -54,9 +61,10 @@ async function readBody(response: Response): Promise<unknown> {
 }
 
 async function replayInput(
+  runId: string,
   previewUrl: string,
   input: CorpusInput,
-  candidateId: string,
+  candidateId: CandidateId,
 ): Promise<RawResult> {
   let url: URL;
 
@@ -64,8 +72,9 @@ async function replayInput(
     url = resolvePreviewUrl(previewUrl, input);
   } catch (cause: unknown) {
     throw new ReplayRequestError(
-      `Replay failed for candidate ${candidateId}, input ${input.id}: invalid preview URL or path`,
+      `Replay failed for run ${JSON.stringify(runId)}, candidate ${candidateId}, input ${input.id}: invalid preview URL or path`,
       {
+        runId,
         candidateId,
         inputId: input.id,
         url: `${previewUrl}${input.path}`,
@@ -104,8 +113,9 @@ async function replayInput(
       : "request failed";
 
     throw new ReplayRequestError(
-      `Replay ${detail} for candidate ${candidateId}, input ${input.id}, URL ${url.toString()}`,
+      `Replay ${detail} for run ${JSON.stringify(runId)}, candidate ${candidateId}, input ${input.id}, URL ${url.toString()}`,
       {
+        runId,
         candidateId,
         inputId: input.id,
         url: url.toString(),
@@ -123,14 +133,15 @@ async function replayInput(
  * with candidate/input context. No business or comparison logic is applied.
  */
 export async function replay(
+  runId: string,
   previewUrl: string,
   corpus: CorpusInput[],
-  candidateId: string,
+  candidateId: CandidateId,
 ): Promise<RawResult[]> {
   const results: RawResult[] = [];
 
   for (const input of corpus) {
-    results.push(await replayInput(previewUrl, input, candidateId));
+    results.push(await replayInput(runId, previewUrl, input, candidateId));
   }
 
   return results;

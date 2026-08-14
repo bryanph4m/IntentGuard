@@ -57,6 +57,7 @@ It is a type-only module. It must never gain a runtime value.
 6. Commit format `<type>(<module>): <imperative summary>`. Commit often, merge
    to main constantly. Long branches die.
 7. Never commit `.env.local` or real credentials.
+8. Do not add AI or tool co-author trailers to commits.
 
 ## Events
 

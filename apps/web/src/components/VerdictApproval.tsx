@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
-  ApprovalReceipt,
-  ApprovalSubmission,
+  ApproveRequest,
+  ApproveResponse,
   RunView,
 } from "../types";
 
 interface VerdictApprovalProps {
   runId: string;
   view: RunView;
-  onApprove: (submission: ApprovalSubmission) => Promise<ApprovalReceipt>;
+  onApprove: (submission: ApproveRequest) => Promise<ApproveResponse>;
 }
 
 function verdictHeading(view: RunView): string {
@@ -67,10 +67,10 @@ function ApprovalStamp({ view }: { view: RunView }) {
       <div className="stamp-title">Approved</div>
       <dl>
         <div><dt>Reviewer</dt><dd>{approval.reviewer}</dd></div>
-        <div><dt>Recorded</dt><dd><time dateTime={approval.timestamp}>{approval.timestamp}</time></dd></div>
+        <div><dt>Recorded</dt><dd><time dateTime={approval.approvedAt}>{approval.approvedAt}</time></dd></div>
         <div><dt>Policy</dt><dd><code>{approval.policyVersion}</code></dd></div>
         <div><dt>Digest</dt><dd><code>{approval.digest}</code></dd></div>
-        <div><dt>Sandboxes</dt><dd><code>{approval.sandboxIds.join(" · ")}</code></dd></div>
+        <div><dt>Sandboxes</dt><dd><code>{view.sandboxes.map((sandbox) => sandbox.sandboxId).join(" · ")}</code></dd></div>
         <div><dt>Comment</dt><dd>{approval.comment}</dd></div>
       </dl>
     </div>
@@ -81,12 +81,18 @@ export function VerdictApproval({ runId, view, onApprove }: VerdictApprovalProps
   const [reviewer, setReviewer] = useState("");
   const [comment, setComment] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [receipt, setReceipt] = useState<ApprovalReceipt>();
+  const [receipt, setReceipt] = useState<ApproveResponse>();
   const [submitError, setSubmitError] = useState<string>();
+  const canApprove =
+    view.verdict?.outcome === "RECOMMEND" && view.verdict.recommended !== null;
 
   const submitApproval = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (receipt !== undefined || submitting) return;
+    if (!canApprove) {
+      setSubmitError("Only a recommended verdict can be approved.");
+      return;
+    }
     setSubmitting(true);
     setSubmitError(undefined);
     try {
@@ -142,7 +148,11 @@ export function VerdictApproval({ runId, view, onApprove }: VerdictApprovalProps
       <div className="approval-block">
         <p className="eyebrow">Reviewer sign-off</p>
         {view.approval === undefined ? (
-          <form onSubmit={submitApproval}>
+          view.verdict !== undefined && !canApprove ? (
+            <p className="sheet-placeholder" role="status">
+              This {view.verdict.outcome.toLowerCase()} verdict cannot be approved.
+            </p>
+          ) : <form onSubmit={submitApproval}>
             <div className="form-grid">
               <label>
                 Reviewer name
@@ -152,7 +162,7 @@ export function VerdictApproval({ runId, view, onApprove }: VerdictApprovalProps
                   onChange={(event) => setReviewer(event.target.value)}
                   autoComplete="name"
                   required
-                  disabled={view.verdict === undefined || submitting || receipt !== undefined}
+                  disabled={!canApprove || submitting || receipt !== undefined}
                 />
               </label>
               <label>
@@ -163,7 +173,7 @@ export function VerdictApproval({ runId, view, onApprove }: VerdictApprovalProps
                   onChange={(event) => setComment(event.target.value)}
                   rows={3}
                   required
-                  disabled={view.verdict === undefined || submitting || receipt !== undefined}
+                  disabled={!canApprove || submitting || receipt !== undefined}
                 />
               </label>
             </div>
@@ -171,7 +181,7 @@ export function VerdictApproval({ runId, view, onApprove }: VerdictApprovalProps
               <button
                 className="secondary-action"
                 type="submit"
-                disabled={view.verdict === undefined || submitting || receipt !== undefined || reviewer.trim() === "" || comment.trim() === ""}
+                disabled={!canApprove || submitting || receipt !== undefined || reviewer.trim() === "" || comment.trim() === ""}
               >
                 {submitting ? "Recording approval…" : "Approve evidence packet"}
               </button>

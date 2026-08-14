@@ -1,54 +1,34 @@
-export type CandidateId = "legacy" | "A" | "B" | "C";
-export type ModernCandidateId = Exclude<CandidateId, "legacy">;
+import type {
+  ApprovalRecord,
+  ApproveRequest,
+  ApproveResponse,
+  CandidateId,
+  GateResult,
+  RawResult,
+  RunEvent as CanonicalRunEvent,
+  RunEventType,
+  SandboxRef,
+  ScanResult,
+  Verdict,
+} from "@intentguard/contracts";
 
-export type EventSourceName =
-  | "forge"
-  | "daytona"
-  | "snyk"
-  | "rocketride"
-  | "control";
+export type {
+  ApprovalRecord,
+  ApproveRequest,
+  ApproveResponse,
+  CandidateId,
+  GateResult,
+  RawResult,
+  RunEventType,
+  SandboxRef,
+  ScanResult,
+  Verdict,
+};
 
-export type RunEventType =
-  | "RUN_QUEUED"
-  | "RULES_LOCKED"
-  | "SANDBOX_CREATED"
-  | "SOURCE_READY"
-  | "SCAN_COMPLETE"
-  | "APP_HEALTHY"
-  | "CORPUS_REPLAYED"
-  | "DIVERGENCE_FOUND"
-  | "GATE_RESULT"
-  | "VERDICT_READY"
-  | "NARRATED"
-  | "APPROVED"
-  | "TORN_DOWN";
+/** Canonical event envelope widened only so newer server event names remain timeline-visible. */
+export type RunEvent = Omit<CanonicalRunEvent, "type"> & { type: string };
 
-export interface RunEvent {
-  seq: number;
-  ts: string;
-  source: EventSourceName;
-  type: string;
-  candidateId?: CandidateId;
-  message: string;
-  payload?: unknown;
-}
-
-export interface ResourceAllocation {
-  cpu: string;
-  memory: string;
-  disk: string;
-  region: string;
-}
-
-export interface SandboxRecord {
-  candidateId: CandidateId;
-  sandboxId: string;
-  snapshotId: string;
-  commitSha: string;
-  previewUrl: string;
-  createdAt: string;
-  resources: ResourceAllocation;
-}
+export type ModernCandidateId = "A" | "B" | "C";
 
 export interface DiffPart {
   text: string;
@@ -63,69 +43,15 @@ export interface LedgerValue {
 export interface LedgerRow {
   id: string;
   order: number;
-  candidateId: ModernCandidateId;
-  inputId: string;
+  candidateId: CandidateId;
+  inputId?: string;
   ruleId: string;
   probe: string;
-  legacy: LedgerValue;
-  candidate: LedgerValue;
+  legacy?: LedgerValue;
+  candidate?: LedgerValue;
   status: "MATCH" | "DIVERGENT";
   note: string;
-}
-
-export interface GateResult {
-  candidateId: ModernCandidateId;
-  key: string;
-  category: "build" | "health" | "behavior" | "security";
-  ruleId?: string;
-  status: "PASS" | "FAIL";
-  detail: string;
-  inputId?: string;
-}
-
-export interface Finding {
-  id: string;
-  severity: "low" | "medium" | "high" | "critical";
-  title: string;
-  file: string;
-  line: number;
-}
-
-export interface ScanResult {
-  candidateId: ModernCandidateId;
-  status: "CLEAN" | "FINDINGS" | "ERROR";
-  findings: Finding[];
-}
-
-export interface CandidateVerdict {
-  candidateId: ModernCandidateId;
-  eligible: boolean;
-  reasons: string[];
-}
-
-export interface Verdict {
-  outcome: "RECOMMEND" | "BLOCKED" | "INCONCLUSIVE";
-  recommended: ModernCandidateId | null;
-  perCandidate: CandidateVerdict[];
-  policyVersion: string;
-}
-
-export interface ApprovalRecord {
-  digest: string;
-  policyVersion: string;
-  sandboxIds: string[];
-  reviewer: string;
-  comment: string;
-  timestamp: string;
-}
-
-export interface ApprovalSubmission {
-  reviewer: string;
-  comment: string;
-}
-
-export interface ApprovalReceipt {
-  digest: string;
+  evidenceKind: "raw" | "gate";
 }
 
 export interface PresentationError {
@@ -135,7 +61,7 @@ export interface PresentationError {
 }
 
 export interface RunView {
-  sandboxes: SandboxRecord[];
+  sandboxes: SandboxRef[];
   activeSandboxIds: Set<string>;
   ledgerRows: LedgerRow[];
   gates: GateResult[];

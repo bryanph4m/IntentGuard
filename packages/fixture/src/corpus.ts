@@ -1,4 +1,4 @@
-import type { CorpusInput, Rule } from "./types.js";
+import type { CorpusInput, Rule } from "@intentguard/contracts";
 
 const APPROVAL_PATH = "/refunds/approve";
 const DEFAULT_AMOUNT = "100.00";
@@ -19,26 +19,34 @@ function inputId(sequence: number): string {
   return `IN-${sequence.toString().padStart(4, "0")}`;
 }
 
-function requireAmount(rule: Rule, boundary: string): string {
+function corpusContext(runId: string, rule: Rule): string {
+  return `run ${JSON.stringify(runId)}, rule ${rule.id}`;
+}
+
+function requireAmount(runId: string, rule: Rule, boundary: string): string {
   const amount = Number(boundary);
 
   if (boundary.trim() === "" || !Number.isFinite(amount)) {
     throw new Error(
-      `Cannot generate corpus input for ${rule.id}: boundary ${JSON.stringify(boundary)} is not a finite amount`,
+      `Cannot generate corpus input for ${corpusContext(runId, rule)}: boundary ${JSON.stringify(boundary)} is not a finite amount`,
     );
   }
 
   return boundary;
 }
 
-function requireRequestedAt(rule: Rule, boundary: string): string {
+function requireRequestedAt(
+  runId: string,
+  rule: Rule,
+  boundary: string,
+): string {
   const requestedAt = boundary.trim();
   const match = REQUESTED_AT_PATTERN.exec(requestedAt);
   const parts = match?.groups;
 
   if (parts === undefined) {
     throw new Error(
-      `Cannot generate corpus input for ${rule.id}: boundary ${JSON.stringify(boundary)} must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ`,
+      `Cannot generate corpus input for ${corpusContext(runId, rule)}: boundary ${JSON.stringify(boundary)} must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ`,
     );
   }
 
@@ -75,19 +83,19 @@ function requireRequestedAt(rule: Rule, boundary: string): string {
 
   if (!calendarDateIsValid || !timeIsValid) {
     throw new Error(
-      `Cannot generate corpus input for ${rule.id}: boundary ${JSON.stringify(boundary)} is not a valid calendar date in YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ form`,
+      `Cannot generate corpus input for ${corpusContext(runId, rule)}: boundary ${JSON.stringify(boundary)} is not a valid calendar date in YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ form`,
     );
   }
 
   return requestedAt;
 }
 
-function requireActor(rule: Rule, boundary: string): string {
+function requireActor(runId: string, rule: Rule, boundary: string): string {
   const actor = boundary.trim();
 
   if (actor === "") {
     throw new Error(
-      `Cannot generate corpus input for ${rule.id}: the audit actor boundary is empty`,
+      `Cannot generate corpus input for ${corpusContext(runId, rule)}: the audit actor boundary is empty`,
     );
   }
 
@@ -99,6 +107,7 @@ function looksLikeDate(boundary: string): boolean {
 }
 
 function applyBoundary(
+  runId: string,
   rule: Rule,
   boundary: string,
   payload: ApprovalPayload,
@@ -107,28 +116,28 @@ function applyBoundary(
     case "REQ-001":
     case "REQ-014":
     case "REQ-031":
-      return { ...payload, amount: requireAmount(rule, boundary) };
+      return { ...payload, amount: requireAmount(runId, rule, boundary) };
     case "REQ-007":
-      return { ...payload, actor: requireActor(rule, boundary) };
+      return { ...payload, actor: requireActor(runId, rule, boundary) };
     case "REQ-022":
       return {
         ...payload,
         amount: "501.00",
-        requested_at: requireRequestedAt(rule, boundary),
+        requested_at: requireRequestedAt(runId, rule, boundary),
       };
     default:
       if (looksLikeDate(boundary)) {
         return {
           ...payload,
-          requested_at: requireRequestedAt(rule, boundary),
+          requested_at: requireRequestedAt(runId, rule, boundary),
         };
       }
 
       if (boundary.trim() !== "" && Number.isFinite(Number(boundary))) {
-        return { ...payload, amount: requireAmount(rule, boundary) };
+        return { ...payload, amount: requireAmount(runId, rule, boundary) };
       }
 
-      return { ...payload, actor: requireActor(rule, boundary) };
+      return { ...payload, actor: requireActor(runId, rule, boundary) };
   }
 }
 
@@ -136,7 +145,7 @@ function applyBoundary(
  * Emits one stable approval request for every boundary, preserving rule and
  * boundary order. No randomness, clock reads, or environment state are used.
  */
-export function generateCorpus(rules: Rule[]): CorpusInput[] {
+export function generateCorpus(runId: string, rules: Rule[]): CorpusInput[] {
   const corpus: CorpusInput[] = [];
 
   for (const rule of rules) {
@@ -149,7 +158,7 @@ export function generateCorpus(rules: Rule[]): CorpusInput[] {
         roles: [],
         requested_at: DEFAULT_REQUESTED_AT,
       };
-      const payload = applyBoundary(rule, boundary, basePayload);
+      const payload = applyBoundary(runId, rule, boundary, basePayload);
 
       corpus.push({
         id,

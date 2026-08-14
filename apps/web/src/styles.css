@@ -553,6 +553,7 @@ main {
 
 .diff-value {
   display: block;
+  overflow-wrap: anywhere;
   white-space: normal;
 }
 
@@ -570,6 +571,22 @@ main {
   font-family: "IBM Plex Sans", sans-serif;
   font-size: 0.875rem;
   line-height: 1.35;
+}
+
+.gate-evidence span,
+.gate-evidence small {
+  display: block;
+}
+
+.gate-evidence span {
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.gate-evidence small {
+  margin-top: 0.4rem;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
 }
 
 .row-result {

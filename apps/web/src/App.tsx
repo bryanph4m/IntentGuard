@@ -8,19 +8,24 @@ import { env } from "./lib/env";
 import { createRunAdapter } from "./lib/run-adapter";
 import { deriveRunView, sortRunEvents } from "./lib/run-events";
 import type {
-  ApprovalReceipt,
-  ApprovalSubmission,
+  ApproveRequest,
+  ApproveResponse,
   ModernCandidateId,
   RunEvent,
+  Verdict,
 } from "./types";
 
 type AppState = "idle" | "starting" | "running" | "error";
 
 const runAdapter = createRunAdapter(env);
 
+function isModernCandidate(candidateId: string | undefined): candidateId is ModernCandidateId {
+  return candidateId === "A" || candidateId === "B" || candidateId === "C";
+}
+
 function runStatusLabel(
   appState: AppState,
-  hasVerdict: boolean,
+  verdictOutcome: Verdict["outcome"] | undefined,
   hasApproval: boolean,
   liveSandboxes: number,
 ): string {
@@ -28,8 +33,10 @@ function runStatusLabel(
   if (appState === "starting") return "STARTING";
   if (appState === "idle") return "READY";
   if (hasApproval) return "APPROVED";
-  if (hasVerdict && liveSandboxes === 0) return "AWAITING APPROVAL";
-  if (hasVerdict) return "FINALIZING";
+  if (verdictOutcome !== undefined && liveSandboxes > 0) return "FINALIZING";
+  if (verdictOutcome === "RECOMMEND") return "AWAITING APPROVAL";
+  if (verdictOutcome === "BLOCKED") return "BLOCKED";
+  if (verdictOutcome === "INCONCLUSIVE") return "INCONCLUSIVE";
   return "EVALUATING";
 }
 
@@ -46,7 +53,7 @@ export default function App() {
   const view = useMemo(() => deriveRunView(orderedEvents), [orderedEvents]);
   const status = runStatusLabel(
     appState,
-    view.verdict !== undefined,
+    view.verdict?.outcome,
     view.approval !== undefined,
     view.activeSandboxIds.size,
   );
@@ -77,6 +84,9 @@ export default function App() {
       unsubscribeRef.current = runAdapter.subscribe(created.runId, {
         onEvent: (event) => {
           if (generation !== runGenerationRef.current) return;
+          if (event.type === "DIVERGENCE_FOUND" && isModernCandidate(event.candidateId)) {
+            setSelectedCandidate(event.candidateId);
+          }
           setEvents((current) => [...current, event]);
         },
         onError: (error) => {
@@ -93,7 +103,7 @@ export default function App() {
   }, []);
 
   const approve = useCallback(
-    async (submission: ApprovalSubmission): Promise<ApprovalReceipt> => {
+    async (submission: ApproveRequest): Promise<ApproveResponse> => {
       if (runId === "") throw new Error("A run must exist before it can be approved.");
       return runAdapter.approve(runId, submission);
     },
@@ -131,8 +141,8 @@ export default function App() {
             </p>
           </div>
           <dl className="run-facts">
-            <div><dt>Source mode</dt><dd>{env.VITE_INTENTGUARD_DATA_MODE === "mock" ? "LOCAL RUN ADAPTER" : "CONTROL API"}</dd></div>
-            <div><dt>Rules</dt><dd>{orderedEvents.some((event) => event.type === "RULES_LOCKED") ? "5 LOCKED" : "PENDING"}</dd></div>
+            <div><dt>Source mode</dt><dd>{env.VITE_INTENTGUARD_DATA_MODE === "mock" ? "CONTROL MOCK SSE" : "CONTROL API"}</dd></div>
+            <div><dt>Rules</dt><dd>{orderedEvents.some((event) => event.type === "RULES_LOCKED") ? "LOCKED" : "PENDING"}</dd></div>
             <div><dt>Evidence</dt><dd>{view.ledgerRows.length} ROWS</dd></div>
             <div><dt>Sandboxes</dt><dd>{view.activeSandboxIds.size} LIVE / {view.sandboxes.length} RECORDED</dd></div>
           </dl>

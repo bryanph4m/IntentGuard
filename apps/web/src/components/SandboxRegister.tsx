@@ -37,9 +37,7 @@ export function SandboxRegister({ view }: { view: RunView }) {
                   <td><code>{sandbox.snapshotId}</code></td>
                   <td><code>{sandbox.commitSha}</code></td>
                   <td>
-                    <code>
-                      {sandbox.resources.cpu} · {sandbox.resources.memory} · {sandbox.resources.disk} · {sandbox.resources.region}
-                    </code>
+                    <code>not reported</code>
                   </td>
                   <td>
                     <span className="sandbox-state">

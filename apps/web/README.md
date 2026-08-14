@@ -1,58 +1,73 @@
 # IntentGuard web
 
-The web client is a strict TypeScript React/Vite application. It renders canonical
-`RunEvent` records in sequence order and treats event payloads as presentation-ready
-evidence. Candidate comparison, security policy, verdict selection, and narration stay
-outside the browser.
+Strict TypeScript React/Vite client for the IntentGuard control plane. Canonical wire and
+domain types come from `@intentguard/contracts`. `src/types.ts` adds only UI presentation
+types; candidate comparison, policy, security decisions, verdict selection, and narration
+stay outside the browser.
 
-## Data adapters
+## Live development mock
 
-Development defaults to `mock` mode. Production defaults to `api` when no explicit mode is
-set, and the mock adapter plus synthetic evidence are loaded only through a development
-dynamic import. The mock plays a stable, timed run through the same `RunAdapter` used by
-the control API. It includes four matching sandboxes, Candidate A behavior divergence,
-Candidate B's critical security block, Candidate C's recommendation, teardown, and the
-approval packet.
+The development mock is the real SSE fixture from `apps/control/src/mock-run.ts`; the web
+bundle contains no synthetic run evidence. The intended development workflow is two
+processes:
 
-The event envelope follows the shared `RunEvent` contract. Components do not inspect raw
-payloads. `src/lib/run-events.ts` is the single normalization boundary and recognizes these
-optional presentation payloads:
+```text
+# terminal 1 — control-owned mock HTTP/SSE server on port 4000
+pnpm mock:serve
 
-| Event | Payload |
-| --- | --- |
-| `SANDBOX_CREATED` | `{ kind: "sandbox", sandbox: SandboxRecord }` |
-| `GATE_RESULT` | `{ kind: "ledger", row: LedgerRow, gate: GateResult }` |
-| `SCAN_COMPLETE` | `{ kind: "scan", scan: ScanResult }` |
-| `VERDICT_READY` | `{ kind: "verdict", verdict: Verdict }` |
-| `NARRATED` | `{ kind: "narration", narration: string }` |
-| `TORN_DOWN` | `{ kind: "teardown", sandboxId: string }` |
-| `APPROVED` | `{ kind: "approval", approval: ApprovalRecord }` |
+# terminal 2
+pnpm --filter @intentguard/web dev
+```
 
-Unknown or newer payloads still render in the append-only timeline. Add their normalization
-in `run-events.ts`; the UI components should not need to change.
+Development defaults to `mock` mode and connects to
+`http://localhost:4000/api/runs/:id/events?speed=6`. It chooses a run ID locally rather than
+POSTing, because the live fixture constructs a deterministic run for the requested ID. The
+fixture auto-approves; the adapter reads `GET /api/runs/:id` when it needs the recorded digest.
 
-The local contract interfaces in `src/types.ts` are a temporary, isolated integration seam
-while `packages/contracts` is unavailable in this working tree. Replace them with type-only
-imports from the frozen package after integration; do not fork or reinterpret those contracts
-inside components.
-
-Copy `.env.example` to `.env.local` only for local work. Set
-`VITE_INTENTGUARD_DATA_MODE=api` to use:
+Set `VITE_INTENTGUARD_DATA_MODE=api` for the real workflow:
 
 - `POST /api/runs`
 - `GET /api/runs/:id/events` through browser `EventSource`
 - `POST /api/runs/:id/approve`
 
-Use `VITE_INTENTGUARD_MOCK_SCENARIO=error` to exercise the interrupted-run state. That
-scenario still emits teardown evidence for every allocated sandbox before surfacing the error.
+Production defaults to `api` when no mode is set. Configure
+`VITE_INTENTGUARD_API_BASE_URL` only when the control API is not same-origin.
+
+## Canonical event payloads
+
+`src/lib/run-events.ts` is the only payload-normalization boundary. It consumes the direct
+canonical payloads emitted by the control fixture:
+
+| Event | Payload |
+| --- | --- |
+| `SANDBOX_CREATED` | `SandboxRef` |
+| `CORPUS_REPLAYED` | `{ results: RawResult[] }` |
+| `DIVERGENCE_FOUND` | `{ ruleId, inputId, blocking }` |
+| `GATE_RESULT` | `GateResult` |
+| `SCAN_COMPLETE` | `ScanResult` |
+| `VERDICT_READY` | `Verdict` |
+| `NARRATED` | `{ narration }` |
+| `APPROVED` | `ApprovalRecord` |
+| `TORN_DOWN` | `{ sandboxCount }` |
+
+Events always render in `seq` order. Unknown event objects delivered through the SSE
+`message` compatibility channel remain timeline-only; canonical named events are registered
+explicitly. Malformed payloads for presentation-critical known events produce a visible
+evidence-display error.
+
+The canonical `SandboxRef` currently reports sandbox, snapshot, commit, preview URL, and
+creation time, but not CPU, memory, disk, or region. The environment register therefore says
+`not reported` for allocation rather than inventing resource parity data.
+
+The ledger never compares bodies or parses human-readable gate details. It shows a raw
+legacy/candidate pair only when upstream identifies a divergent `inputId` and both recorded
+`RawResult` values are present. Rule gates without per-input evidence show the canonical gate
+detail and state that raw responses were not reported.
 
 ## Commands
 
-From the workspace root:
-
 ```text
-pnpm --filter @intentguard/web dev
-pnpm --filter @intentguard/web build
 pnpm --filter @intentguard/web typecheck
 pnpm --filter @intentguard/web test
+pnpm --filter @intentguard/web build
 ```

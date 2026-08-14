@@ -59,11 +59,18 @@ audit totals.
 pnpm --filter @intentguard/web dev
 ```
 
-Development uses the timed mock run by default. Set the values documented in
-`apps/web/.env.example` to exercise the interrupted-run state or to connect to
-the control API. Production defaults to the real API path. Event payload
-normalization is isolated in `apps/web/src/lib/run-events.ts`; component code
-does not compare candidate behavior or apply policy.
+Run the canonical control-plane mock and the web client in separate terminals:
+
+```sh
+pnpm mock:serve
+pnpm dev:web
+```
+
+Development mock mode consumes the real SSE stream at `http://localhost:4000`.
+Set the values documented in `apps/web/.env.example` to use another control
+origin or the real API mode. Production defaults to the real API path. Event
+payload normalization is isolated in `apps/web/src/lib/run-events.ts`;
+component code does not compare candidate behavior or apply policy.
 
 ```sh
 pnpm --filter @intentguard/web typecheck

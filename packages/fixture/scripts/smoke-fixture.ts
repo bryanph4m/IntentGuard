@@ -10,6 +10,8 @@ import {
   type Rule,
 } from "../src/index.js";
 
+const RUN_ID = "run-smoke-fixture";
+
 const rules: Rule[] = [
   {
     id: "REQ-014",
@@ -47,7 +49,7 @@ async function readRequestBody(request: IncomingMessage): Promise<unknown> {
 }
 
 async function main(): Promise<void> {
-  const corpus = generateCorpus(rules);
+  const corpus = generateCorpus(RUN_ID, rules);
 
   assert.equal(corpus.length, 8);
   assert.deepEqual(
@@ -73,7 +75,7 @@ async function main(): Promise<void> {
   assert.ok(corpus.every((input) => input.path === "/refunds/approve"));
   assert.throws(
     () =>
-      generateCorpus([
+      generateCorpus(RUN_ID, [
         {
           id: "REQ-022",
           title: "Last business day",
@@ -82,11 +84,11 @@ async function main(): Promise<void> {
           blocking: true,
         },
       ]),
-    /REQ-022.*YYYY-MM-DDTHH:MM:SSZ/u,
+    /run-smoke-fixture.*REQ-022.*YYYY-MM-DDTHH:MM:SSZ/u,
   );
   assert.throws(
     () =>
-      generateCorpus([
+      generateCorpus(RUN_ID, [
         {
           id: "REQ-022",
           title: "Last business day",
@@ -95,7 +97,7 @@ async function main(): Promise<void> {
           blocking: true,
         },
       ]),
-    /REQ-022.*not a valid calendar date/u,
+    /run-smoke-fixture.*REQ-022.*not a valid calendar date/u,
   );
 
   const server = createServer(async (request, response) => {
@@ -123,7 +125,12 @@ async function main(): Promise<void> {
   try {
     const address = server.address() as AddressInfo;
     const previewUrl = `http://127.0.0.1:${address.port}`;
-    const results = await replay(previewUrl, corpus.slice(0, 2), "smoke-candidate");
+    const results = await replay(
+      RUN_ID,
+      previewUrl,
+      corpus.slice(0, 2),
+      "smoke-candidate",
+    );
 
     assert.equal(results.length, 2);
     assert.equal(results[0]?.candidateId, "smoke-candidate");
@@ -142,15 +149,21 @@ async function main(): Promise<void> {
       path: "/health",
       payload: {},
     };
-    const [health] = await replay(previewUrl, [healthInput], "smoke-candidate");
+    const [health] = await replay(
+      RUN_ID,
+      previewUrl,
+      [healthInput],
+      "smoke-candidate",
+    );
 
     assert.equal(health?.status, 200);
     assert.deepEqual(health?.body, { status: "ok" });
 
     await assert.rejects(
-      replay("not a URL", [healthInput], "broken-candidate"),
+      replay(RUN_ID, "not a URL", [healthInput], "broken-candidate"),
       (error: unknown) =>
         error instanceof ReplayRequestError &&
+        error.runId === RUN_ID &&
         error.candidateId === "broken-candidate" &&
         error.inputId === "IN-HEALTH",
     );

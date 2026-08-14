@@ -114,18 +114,25 @@ export function ReconciliationLedger({
                 >
                   <th scope="row" className="rule-margin" data-label="Rule">
                     <span>{row.ruleId}</span>
-                    <small>{row.inputId}</small>
+                    <small>{row.inputId ?? "RULE GATE"}</small>
                   </th>
                   <td className="probe-value" data-label="Input">
                     <code>{row.probe}</code>
                   </td>
-                  <td data-label="Legacy response">
-                    <DiffValue value={row.legacy} />
-                  </td>
-                  <td data-label={`Candidate ${selectedCandidate} response`}>
-                    <DiffValue value={row.candidate} />
-                    <small className="ledger-note">{row.note}</small>
-                  </td>
+                  {row.evidenceKind === "raw" && row.legacy !== undefined && row.candidate !== undefined ? (
+                    <>
+                      <td data-label="Legacy response"><DiffValue value={row.legacy} /></td>
+                      <td data-label={`Candidate ${selectedCandidate} response`}>
+                        <DiffValue value={row.candidate} />
+                        <small className="ledger-note">{row.note}</small>
+                      </td>
+                    </>
+                  ) : (
+                    <td className="gate-evidence" colSpan={2} data-label="Gate evidence">
+                      <span>{row.note}</span>
+                      <small>Per-input raw responses were not reported for this rule gate.</small>
+                    </td>
+                  )}
                   <td className="row-result" data-label="Result">
                     {row.status === "MATCH" ? "MATCH" : "DIVERGED"}
                   </td>

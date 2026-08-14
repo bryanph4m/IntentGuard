@@ -1,7 +1,9 @@
 node_modules/
+.pnpm-store/
 .next/
 dist/
 out/
+coverage/
 *.tsbuildinfo
 
 .env
@@ -13,5 +15,16 @@ out/
 *.db-shm
 data/
 
+__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite3
+
 .DS_Store
+Thumbs.db
 *.log
+
+.codex-rebase-backup/
+.tmp-browse-preamble.sh
+graphify-out/
+.gstack/
