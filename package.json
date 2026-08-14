@@ -15,7 +15,8 @@
     "mock:serve": "tsx apps/control/scripts/mock-sse.ts",
     "smoke:control": "pnpm --filter @intentguard/control smoke:mock",
     "smoke:control-core": "pnpm --filter @intentguard/control smoke",
-    "smoke:fixture": "pnpm --filter @intentguard/fixture smoke"
+    "smoke:fixture": "pnpm --filter @intentguard/fixture smoke",
+    "smoke:execution": "pnpm --filter @intentguard/execution smoke"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

@@ -1,18 +1,25 @@
-/**
- * packages/execution
- *
- * Owner: Neel. Everything that talks to a third party: Daytona, Snyk, RocketRide.
- * Path reserved in hour 0 so nobody creates a competing directory.
- *
- * Expected exports, per the shared contracts doc. Each takes runId first and
- * calls emitEvent(runId, ...) itself; Laksh's worker does not emit on your
- * behalf.
- *
- *   provision(runId, candidateIds: CandidateId[], snapshotId: string): Promise<SandboxRef[]>  // parallel
- *   scan(runId, ref: SandboxRef): Promise<ScanResult>
- *   teardown(runId: string): Promise<void>
- *   narrate(runId, verdict: Verdict, gates: GateResult[]): Promise<string>
- *
- * Replace this file. Do not change its path.
- */
-export {};
+import type { CandidateId, GateResult, SandboxRef, ScanResult, Verdict } from "@intentguard/contracts";
+import { productionDependencies } from "./lib/production.js";
+import { ExecutionRuntime } from "./runtime.js";
+
+const runtime = new ExecutionRuntime(productionDependencies());
+
+export function provision(
+  runId: string,
+  candidateIds: CandidateId[],
+  snapshotId: string,
+): Promise<SandboxRef[]> {
+  return runtime.provision(runId, candidateIds, snapshotId);
+}
+
+export function scan(runId: string, ref: SandboxRef): Promise<ScanResult> {
+  return runtime.scan(runId, ref);
+}
+
+export function teardown(runId: string): Promise<void> {
+  return runtime.teardown(runId);
+}
+
+export function narrate(runId: string, verdict: Verdict, gates: GateResult[]): Promise<string> {
+  return runtime.narrate(runId, verdict, gates);
+}

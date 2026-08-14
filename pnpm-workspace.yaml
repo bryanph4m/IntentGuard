@@ -3,3 +3,9 @@ packages:
   - "apps/*"
 allowBuilds:
   esbuild: true
+  protobufjs: true
+minimumReleaseAgeExclude:
+  - '@daytona/analytics-api-client@0.204.1'
+  - '@daytona/api-client@0.204.1'
+  - '@daytona/sdk@0.204.1'
+  - '@daytona/toolbox-api-client@0.204.1'
